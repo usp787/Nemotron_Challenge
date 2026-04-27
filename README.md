@@ -276,7 +276,7 @@ From the OOD terminal:
 
 ```bash
 cd $HOME
-git clone git@github.com:<YOUR_USERNAME>/nemotron-challenge.git
+git clone git@github.com:usp787/Nemotron_Challenge.git
 cd nemotron-challenge
 mkdir -p logs outputs
 ```
