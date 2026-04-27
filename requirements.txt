@@ -1,0 +1,10 @@
+# Backup / illustrative dependency list.
+# The authoritative runtime is the Apptainer .sif image on HPC; this file
+# exists for local linting, IDE introspection, and as a reference of the
+# minimum Python packages the baseline scripts expect.
+
+vllm>=0.6.0
+transformers>=4.45.0
+torch>=2.4.0
+pyyaml>=6.0
+huggingface_hub>=0.24.0

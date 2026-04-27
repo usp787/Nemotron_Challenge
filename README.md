@@ -186,7 +186,7 @@ The `--nv` flag exposes NVIDIA GPUs to the container.
 ## 5. Suggested Repository Structure
 
 ```text
-nemotron-challenge/
+Nemotron_Challenge/
 ├── README.md
 ├── .gitignore
 ├── configs/
@@ -218,7 +218,6 @@ outputs/
 *.out
 *.err
 *.jsonl
-!data/sample_prompts_5.jsonl
 
 # Python
 __pycache__/
@@ -259,7 +258,7 @@ Do **not** commit:
 Recommended split:
 
 ```text
-$HOME/nemotron-challenge/          # code repo
+$HOME/Nemotron_Challenge/          # code repo
 $SCRATCH/containers/               # Apptainer images
 $SCRATCH/huggingface/              # HF cache
 $SCRATCH/nemotron_outputs/         # large outputs
@@ -277,7 +276,7 @@ From the OOD terminal:
 ```bash
 cd $HOME
 git clone git@github.com:usp787/Nemotron_Challenge.git
-cd nemotron-challenge
+cd Nemotron_Challenge
 mkdir -p logs outputs
 ```
 
@@ -299,7 +298,7 @@ Optional: add these exports to the Slurm scripts rather than `.bashrc` so the ru
 
 ---
 
-### 7.3 Container Location
+### 7.3 Container Provenance and Location
 
 Expected container path:
 
@@ -309,7 +308,245 @@ $SCRATCH/containers/nemotron_vllm.sif
 
 This file is not committed to GitHub.
 
-If the cluster allows pulling Docker images through Apptainer, one possible starting point is a vLLM OpenAI image. If the cluster has NVIDIA NGC/NeMo images available, prefer the admin-recommended image.
+#### Why the container is still necessary even after config is set
+
+The YAML config only controls **runtime choices**:
+
+```text
+model name
+dtype
+max_model_len
+temperature
+max_tokens
+input/output paths
+vLLM runtime options
+```
+
+The config does **not** provide the executable software environment:
+
+```text
+Python version
+CUDA runtime libraries
+PyTorch build
+vLLM version
+Transformers version
+FlashAttention / custom kernels
+system shared libraries
+OpenAI-compatible serving dependencies
+```
+
+Therefore, the pipeline needs both:
+
+```text
+Apptainer container = reproducible software environment
+YAML config         = reproducible experiment settings
+Slurm script        = reproducible HPC resource request
+```
+
+A useful mental model:
+
+```text
+Slurm asks:       Where and with what resources should this job run?
+Apptainer asks:   What software environment should this job use?
+Config asks:      What model and generation settings should this experiment use?
+```
+
+#### Recommended container provenance levels
+
+Use the most trustworthy available container source first.
+
+| Priority | Container source | When to use | Notes |
+|---|---|---|---|
+| 1 | HPC-admin-provided vLLM / PyTorch / NeMo Apptainer image | Best first choice if available | Most likely to match the cluster driver, CUDA stack, filesystem policy, and H200 partition |
+| 2 | Official vLLM Docker image converted to Apptainer `.sif` | Best self-managed baseline choice | Good for OpenAI-compatible server baseline and batch inference |
+| 3 | NVIDIA NGC / NeMo Framework container converted to Apptainer | Good if using NeMo tooling or NVIDIA evaluator workflow | Potentially heavier, but closer to NVIDIA's ecosystem |
+| 4 | Custom Apptainer definition file | Use only after baseline works | More control, but more maintenance/debugging |
+| 5 | Manually patched Jupyter/conda environment | Avoid for main run | Harder to reproduce and easier to break |
+
+The baseline recommendation for this repo is:
+
+```text
+Start with an existing vLLM-compatible container.
+Do not build a custom container until a simple baseline already works.
+```
+
+#### Option A: Use an HPC-provided image
+
+Ask the HPC team:
+
+```text
+Is there a maintained Apptainer image for CUDA + PyTorch + vLLM on the H200 partition?
+Is there a maintained NVIDIA NeMo or NGC image?
+Which image is recommended for H200 inference jobs?
+```
+
+If they provide a path like:
+
+```text
+/shared/containers/vllm/vllm-openai-cu12.sif
+```
+
+then set the Slurm script variable:
+
+```bash
+CONTAINER=/shared/containers/vllm/vllm-openai-cu12.sif
+```
+
+This is usually the cleanest option because the image is more likely to match the cluster driver and CUDA environment.
+
+#### Option B: Pull an official vLLM Docker image into Apptainer
+
+If the cluster allows pulling from Docker Hub:
+
+```bash
+mkdir -p $SCRATCH/containers
+cd $SCRATCH/containers
+
+apptainer pull nemotron_vllm.sif docker://vllm/vllm-openai:<PINNED_TAG>
+```
+
+Then test GPU visibility:
+
+```bash
+apptainer exec --nv $SCRATCH/containers/nemotron_vllm.sif nvidia-smi
+```
+
+Then test Python/vLLM:
+
+```bash
+apptainer exec --nv $SCRATCH/containers/nemotron_vllm.sif bash -lc "
+python --version
+python -c 'import vllm; print(\"vLLM import OK\")'
+"
+```
+
+For reproducibility, avoid using `latest` permanently. After the first successful test, pin a specific image tag and record it in `docs/hpc_setup_notes.md`.
+
+Example:
+
+```text
+Container source: docker://vllm/vllm-openai:<PINNED_TAG>
+Converted SIF: $SCRATCH/containers/nemotron_vllm.sif
+HPC node type: H200
+Date tested: YYYY-MM-DD
+Smoke test status: passed / failed
+```
+
+#### Option C: Use NVIDIA NGC / NeMo image
+
+This is a good choice if the workflow later depends on NeMo Evaluator, NeMo Skills, or NVIDIA-specific evaluation tooling.
+
+Ask the HPC team whether NGC images are already mirrored or available. If not, check whether pulling from NGC is allowed from the cluster.
+
+Record the source clearly:
+
+```text
+Container source: NVIDIA NGC / NeMo Framework
+Original image URI: <IMAGE_URI>
+Converted SIF path: $SCRATCH/containers/nemotron_vllm.sif
+Reason for use: NeMo/NVIDIA evaluator compatibility
+```
+
+#### Option D: Custom container definition file
+
+Use this only after the basic baseline works. A custom definition file is useful when:
+
+```text
+official vLLM image lacks a required package
+cluster-provided image has incompatible package versions
+we need to pin exact versions for final reproducibility
+we need to add project-specific evaluation dependencies
+```
+
+Example definition-file direction:
+
+```text
+Bootstrap: docker
+From: vllm/vllm-openai:<PINNED_TAG>
+
+%post
+    pip install --no-cache-dir datasets pandas pyyaml tqdm
+
+%environment
+    export HF_HOME=/scratch/huggingface
+```
+
+Do not start here unless necessary. Custom containers increase debugging cost.
+
+#### How the current pipeline references the container
+
+The pipeline references the container through one variable in the Slurm script:
+
+```bash
+CONTAINER=$SCRATCH/containers/nemotron_vllm.sif
+```
+
+Then the Slurm script runs commands inside it:
+
+```bash
+apptainer exec --nv \
+  --bind $PROJECT_DIR:/workspace \
+  --bind $SCRATCH:$SCRATCH \
+  $CONTAINER \
+  bash -lc "
+    cd /workspace
+    python scripts/check_env.py
+    python scripts/baseline_generate.py --config configs/baseline_h200.yaml
+  "
+```
+
+In other words, the container is not imported by Python and not listed inside the YAML config. It is referenced by the **Slurm execution layer**.
+
+Recommended separation:
+
+```text
+slurm/run_baseline.slurm       contains container path and HPC resource request
+configs/baseline_h200.yaml     contains model/generation/input/output settings
+scripts/baseline_generate.py   contains inference logic
+```
+
+#### Minimal container provenance checklist
+
+Before trusting a container, record (a fillable template lives in `docs/hpc_setup_notes.md`):
+
+```text
+Container source URI:
+Container tag or digest:
+SIF path:
+Build/pull date:
+HPC node type:
+NVIDIA driver version:
+CUDA version visible in container:
+Python version:
+PyTorch version:
+vLLM version:
+Transformers version:
+Smoke test result:
+Known issues:
+```
+
+Example command to collect part of this information:
+
+```bash
+apptainer exec --nv $CONTAINER bash -lc "
+echo '=== Python ==='
+python --version
+
+echo '=== NVIDIA ==='
+nvidia-smi
+
+echo '=== Packages ==='
+python - <<'PY'
+import importlib.metadata as md
+
+for pkg in ['torch', 'vllm', 'transformers', 'accelerate', 'huggingface_hub']:
+    try:
+        print(pkg, md.version(pkg))
+    except md.PackageNotFoundError:
+        print(pkg, 'NOT INSTALLED')
+PY
+"
+```
 
 Before using a container for model execution, test:
 
@@ -364,7 +601,7 @@ echo "Node: $(hostname)"
 echo "Job ID: $SLURM_JOB_ID"
 nvidia-smi
 
-PROJECT_DIR=$HOME/nemotron-challenge
+PROJECT_DIR=$HOME/Nemotron_Challenge
 CONTAINER=$SCRATCH/containers/nemotron_vllm.sif
 
 export HF_HOME=$SCRATCH/huggingface
@@ -399,6 +636,219 @@ Read logs:
 cat logs/nemotron_smoke_<JOB_ID>.out
 cat logs/nemotron_smoke_<JOB_ID>.err
 ```
+
+---
+
+### 8.3 Recommended Smoke Test Scope
+
+The smoke test should not be only `nvidia-smi`. It should verify the full path from Slurm allocation to container runtime to Python import to model-level generation.
+
+Use a staged smoke test so failures are easy to locate. Stages 0 and 1 run in `slurm/smoke_test.slurm` (host side); stages 2–5 run inside `scripts/smoke_test.py`; stage 6 reuses `scripts/baseline_generate.py` with `configs/smoke_h200.yaml`.
+
+#### Stage 0: Slurm allocation check
+
+Goal:
+
+```text
+Confirm the job is running on a compute node with the requested GPU.
+```
+
+Checks:
+
+```bash
+hostname
+echo $SLURM_JOB_ID
+echo $CUDA_VISIBLE_DEVICES
+nvidia-smi
+```
+
+Success means:
+
+```text
+Slurm gave the job a GPU allocation.
+The job is not accidentally running on the login node.
+The NVIDIA driver can see the H200.
+```
+
+Failure usually means:
+
+```text
+wrong partition
+missing --gres=gpu:1
+OOD shell used directly instead of sbatch/salloc
+GPU node unavailable
+```
+
+#### Stage 1: Apptainer GPU passthrough check
+
+Goal:
+
+```text
+Confirm the container can see the same GPU through Apptainer.
+```
+
+Command:
+
+```bash
+apptainer exec --nv $CONTAINER nvidia-smi
+```
+
+Success means:
+
+```text
+Apptainer --nv is working.
+The host driver is visible inside the container.
+```
+
+Failure usually means:
+
+```text
+forgot --nv
+container runtime issue
+host driver/library path problem
+container incompatible with cluster GPU setup
+```
+
+#### Stage 2: Python package check
+
+Goal:
+
+```text
+Confirm the container has the expected Python inference stack.
+```
+
+Inside `scripts/smoke_test.py`:
+
+```python
+import torch
+print('torch:', torch.__version__)
+print('cuda available:', torch.cuda.is_available())
+print('gpu count:', torch.cuda.device_count())
+if torch.cuda.is_available():
+    print('gpu name:', torch.cuda.get_device_name(0))
+    print('bf16 supported:', torch.cuda.is_bf16_supported())
+
+import transformers
+print('transformers:', transformers.__version__)
+
+import vllm
+print('vllm:', vllm.__version__)
+```
+
+Success means Python, PyTorch, Transformers, and vLLM are usable inside the container. Failure usually means wrong container, missing package, or CUDA/PyTorch mismatch.
+
+#### Stage 3: Hugging Face metadata access
+
+Goal:
+
+```text
+Confirm the job can reach Hugging Face metadata or use existing authentication/cache.
+```
+
+Recommended environment variables (set in the Slurm script):
+
+```bash
+export HF_HOME=$SCRATCH/huggingface
+export TRANSFORMERS_CACHE=$SCRATCH/huggingface
+export HF_HUB_CACHE=$SCRATCH/huggingface/hub
+```
+
+Minimal check (no weight download):
+
+```python
+from huggingface_hub import model_info
+info = model_info('nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16')
+print('model id:', info.modelId)
+print('sha:', info.sha)
+```
+
+Failure usually means missing HF token, no internet on the compute node, model gating not accepted, or the cache path was not bind-mounted into the container.
+
+If compute nodes cannot access the internet, pre-download the model to `$SCRATCH/huggingface` from an allowed node first.
+
+#### Stage 4: Tokenizer + chat template check
+
+Goal:
+
+```text
+Confirm the model tokenizer can be loaded before loading full weights.
+```
+
+```python
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained(
+    'nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16',
+    trust_remote_code=True,
+)
+messages = [{'role': 'user', 'content': 'Answer in one sentence: what is 2 + 2?'}]
+text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+print(text[:500])
+```
+
+Failure usually means missing `trust_remote_code`, inaccessible model metadata, or an incompatible Transformers version.
+
+#### Stage 5: Single-prompt model load and generation
+
+Goal:
+
+```text
+Confirm the model can generate one short response.
+```
+
+Use small runtime settings first:
+
+```text
+max_model_len: 8192
+max_tokens: 64
+temperature: 0.0
+gpu_memory_utilization: 0.80
+```
+
+Expected behavior: the first run may take a long time because model weights are downloaded and loaded; the second run should be much faster if `$SCRATCH/huggingface` is persistent.
+
+Failure usually means GPU OOM, vLLM unsupported version, model architecture support issue, CUDA kernel issue, or a cache/download problem.
+
+#### Stage 6: Five-prompt mini baseline
+
+Goal:
+
+```text
+Confirm the baseline loop, error handling, and JSONL output format.
+```
+
+Driver: `scripts/baseline_generate.py` with `configs/smoke_h200.yaml`.
+
+Input: `data/sample_prompts_5.jsonl`
+Expected output: `outputs/smoke_predictions_<JOB_ID>.jsonl`
+
+Checks:
+
+```bash
+wc -l outputs/smoke_predictions_<JOB_ID>.jsonl
+head -n 1 outputs/smoke_predictions_<JOB_ID>.jsonl
+tail -n 1 outputs/smoke_predictions_<JOB_ID>.jsonl
+```
+
+Success means the model can process multiple prompts, the output file is valid JSONL, and per-prompt errors are captured instead of crashing the whole run.
+
+Only after this stage should the repo move to 20, 100, or full challenge-scale prompts.
+
+#### Smoke Test Pass/Fail Criteria
+
+A smoke test is considered passed only if:
+
+```text
+1. Slurm allocates the H200 GPU.
+2. Apptainer sees the GPU with --nv.
+3. Python imports torch, transformers, and vLLM.
+4. PyTorch reports CUDA available.
+5. HF metadata access works.
+6. Tokenizer/chat template loads.
+7. One short generation succeeds.
+8. Five-prompt JSONL baseline succeeds.
+```
+
+A partial pass should be documented in `docs/hpc_setup_notes.md` using the partial-pass log template there.
 
 ---
 
@@ -503,6 +953,65 @@ Nemotron supports long-context usage, but very long context increases KV-cache m
 
 ---
 
+### 10.1 Relationship Between Config and Container
+
+The baseline config does not replace the container.
+
+The config answers:
+
+```text
+Which model?
+Which dtype?
+How long is the context?
+How many tokens to generate?
+Where are the input/output files?
+```
+
+The container answers:
+
+```text
+Which Python?
+Which CUDA runtime?
+Which PyTorch?
+Which vLLM?
+Which Transformers?
+Which compiled kernels?
+```
+
+Therefore, changing `configs/baseline_h200.yaml` changes the experiment but does not change the installed software. To change the software stack, change the Apptainer image referenced in the Slurm script.
+
+Recommended convention:
+
+```bash
+# slurm/run_baseline.slurm
+CONTAINER=$SCRATCH/containers/nemotron_vllm.sif
+CONFIG=configs/baseline_h200.yaml
+```
+
+Then execute:
+
+```bash
+apptainer exec --nv \
+  --bind $PROJECT_DIR:/workspace \
+  --bind $SCRATCH:$SCRATCH \
+  $CONTAINER \
+  bash -lc "
+    cd /workspace
+    python scripts/baseline_generate.py --config $CONFIG
+  "
+```
+
+This makes the provenance clear:
+
+```text
+Slurm file = resource + container provenance
+YAML file  = experiment configuration
+Python     = baseline logic
+Output     = generated predictions and metrics
+```
+
+---
+
 ## 11. Example vLLM Baseline Slurm Script
 
 Example `slurm/run_baseline.slurm`:
@@ -526,7 +1035,7 @@ echo "Started at: $(date)"
 
 nvidia-smi
 
-PROJECT_DIR=$HOME/nemotron-challenge
+PROJECT_DIR=$HOME/Nemotron_Challenge
 CONTAINER=$SCRATCH/containers/nemotron_vllm.sif
 
 export HF_HOME=$SCRATCH/huggingface
@@ -596,8 +1105,8 @@ Only after that, move toward full competition evaluation.
 ### Local Laptop
 
 ```bash
-git clone git@github.com:<YOUR_USERNAME>/nemotron-challenge.git
-cd nemotron-challenge
+git clone git@github.com:<YOUR_USERNAME>/Nemotron_Challenge.git
+cd Nemotron_Challenge
 code .
 ```
 
@@ -612,7 +1121,7 @@ git push
 ### HPC through OOD
 
 ```bash
-cd $HOME/nemotron-challenge
+cd $HOME/Nemotron_Challenge
 git pull
 sbatch slurm/smoke_test.slurm
 ```

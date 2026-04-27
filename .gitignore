@@ -1,0 +1,25 @@
+# Runtime outputs
+logs/
+outputs/
+*.out
+*.err
+*.jsonl
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Caches
+.cache/
+.huggingface/
+
+# Large files
+models/
+checkpoints/
+*.sif
+*.simg
+
+# Local environment
+.env
+.venv/
