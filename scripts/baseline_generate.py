@@ -25,7 +25,10 @@ def read_prompts(path: str) -> list[dict]:
     if not prompt_path.exists():
         raise FileNotFoundError(
             f"Input JSONL not found: {prompt_path}. "
-            "For the smoke run, ensure data/sample_prompts_5.jsonl is present."
+            "Smoke runs use data/sample_prompts_5.jsonl (tracked in git). "
+            "AIME25 baseline runs require data/aime25.jsonl - generate it "
+            "with `python3 scripts/prepare_aime25.py` from a node with "
+            "outbound internet (typically the login node)."
         )
 
     items: list[dict] = []
@@ -77,13 +80,28 @@ def main() -> None:
         max_tokens=model_cfg.get("max_tokens", 1024),
     )
 
+    # Nemotron 3 Nano relies on its chat template to inject the <think>
+    # reasoning prefix. Sending the raw user prompt to llm.generate()
+    # bypasses that and silently disables thinking mode, so we apply the
+    # template explicitly with enable_thinking=True (the model card's
+    # default and what the published AIME25 numbers were produced with).
+    tokenizer = llm.get_tokenizer()
+
     successes = 0
     failures = 0
     with open(out_path, "w", encoding="utf-8") as out:
         for item in prompts:
+            formatted_prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": item["prompt"]}],
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=True,
+            )
             record = {
                 "id": item.get("id"),
                 "prompt": item.get("prompt"),
+                "formatted_prompt": formatted_prompt,
+                "expected_answer": item.get("expected_answer"),
                 "response": None,
                 "latency_sec": None,
                 "model": model_cfg["name"],
@@ -92,7 +110,7 @@ def main() -> None:
             }
             try:
                 t0 = time.perf_counter()
-                outputs = llm.generate([item["prompt"]], sampling)
+                outputs = llm.generate([formatted_prompt], sampling)
                 record["latency_sec"] = round(time.perf_counter() - t0, 3)
                 record["response"] = outputs[0].outputs[0].text
                 successes += 1

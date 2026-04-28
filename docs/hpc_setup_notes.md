@@ -160,7 +160,14 @@ wc -l outputs/smoke_predictions_6375635.jsonl
 apptainer exec --nv $SCRATCH/containers/nemotron_vllm.sif \
   python3 scripts/evaluate.py --predictions outputs/smoke_predictions_<JOB_ID>.jsonl
 
-# 7. Only after smoke passes — submit the full baseline
+# 7. Prepare the AIME25 dataset (one-time, login node — needs internet)
+#    Writes data/aime25.jsonl (30 problems) using MathArena/aime_2025
+#    with the NeMo-Skills boxed-answer prompt template baked in.
+apptainer exec $SCRATCH/containers/nemotron_vllm.sif \
+  python3 scripts/prepare_aime25.py
+wc -l data/aime25.jsonl   # expect 30
+
+# 8. Only after smoke passes and aime25.jsonl exists — submit the baseline
 sbatch slurm/run_baseline.slurm
 squeue -u $USER
 cat logs/nemotron_baseline_<JOB_ID>.out

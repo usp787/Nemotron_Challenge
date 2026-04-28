@@ -13,7 +13,7 @@ runtime:
   tensor_parallel_size: 1
 
 data:
-  input_path: data/sample_prompts_5.jsonl
+  input_path: data/aime25.jsonl
   output_dir: outputs
 
 logging:
