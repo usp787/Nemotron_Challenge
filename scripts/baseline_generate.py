@@ -58,6 +58,7 @@ def main() -> None:
         max_model_len=model_cfg.get("max_model_len", 32768),
         gpu_memory_utilization=runtime_cfg.get("gpu_memory_utilization", 0.9),
         tensor_parallel_size=runtime_cfg.get("tensor_parallel_size", 1),
+        trust_remote_code=model_cfg.get("trust_remote_code", False),
     )
 
     sampling = SamplingParams(

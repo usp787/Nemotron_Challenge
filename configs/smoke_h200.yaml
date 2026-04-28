@@ -5,6 +5,7 @@ model:
   max_tokens: 256
   temperature: 0.0
   top_p: 1.0
+  trust_remote_code: true
 
 runtime:
   backend: vllm

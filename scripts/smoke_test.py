@@ -91,6 +91,7 @@ def stage_5_generation() -> None:
         max_model_len=SMOKE_MAX_MODEL_LEN,
         gpu_memory_utilization=SMOKE_GPU_MEMORY_UTIL,
         tensor_parallel_size=1,
+        trust_remote_code=True,
     )
     sampling = SamplingParams(
         temperature=0.0, top_p=1.0, max_tokens=SMOKE_MAX_TOKENS
