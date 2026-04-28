@@ -1243,3 +1243,42 @@ After the baseline is stable, possible next steps include:
 - Hugging Face model card: `https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`
 - NVIDIA NeMo Evaluator example for Nemotron 3 Nano: `https://github.com/NVIDIA-NeMo/Evaluator/blob/main/packages/nemo-evaluator-launcher/examples/nemotron/nano-v3-reproducibility.md`
 - vLLM project documentation: `https://docs.vllm.ai/`
+
+---
+
+## 17. Bring-up Log
+
+### 2026-04-27 — Initial cluster bring-up on Northeastern Explorer
+
+**End-of-day status: HPC/infra setup is correct, H200 application path is fluent, smoke test pipeline (Stages 0–5) passes. Stage 6 / output JSONL persistence is the open item for next session.**
+
+**Completed today:**
+
+- **HPC / infra setup is basically correct.** `$SCRATCH=/scratch/$USER` exported in `~/.bashrc`, GitHub SSH auth from cluster working, scratch dirs created (`containers`, `huggingface`, `apptainer/{tmp,cache}`). Storage confirmed healthy — scratch is 2.0 PB total with 627 TB free; user usage 0 B going in.
+- **H200 application path is overall fluent.** Probe job 6371194 allocated a single H200 (143,771 MiB VRAM, driver 570.86.15, CUDA 12.8) on partition `gpu` via `--gres=gpu:h200:1`. The earlier "H200 partition quota issue" was a misdiagnosis: `h200` is not a partition name on Explorer — it's a `--gres` value on the `gpu`/`gpu-short`/`gpu-interactive` partitions. H200 nodes: d4052–d4055 (8 GPUs each, 512 GB system RAM). A100 backup: d1026, d1028, d1029 (80 GB VRAM each).
+- **Container pulled** to `$SCRATCH/containers/nemotron_vllm.sif` (7.7 GB, `vllm/vllm-openai:v0.12.0`) from a CPU allocation on `short` partition (login-node `/tmp` is too small for `mksquashfs`). Total wall time ~37 min.
+- **Slurm scripts updated** through four iterations to land at a working H200 invocation:
+    1. `--partition=h200` → `--partition=gpu --gres=gpu:h200:1`.
+    2. `python` → `python3` (the vLLM container has no `python` symlink).
+    3. `PYTHONNOUSERSITE=1` (Apptainer auto-binds `$HOME`, so a stale `~/.local/lib/python3.12/site-packages/` was shadowing the container's `vllm`/`flashinfer`).
+    4. `trust_remote_code=True` added to `LLM(...)` calls and config YAMLs (Nemotron-H is a custom architecture; `NemotronHForCausalLM` is not in transformers core).
+- HF auth: `hf auth login` (the deprecated `huggingface-cli` is gone on Explorer's HF version); token saved at `~/.cache/huggingface/token`. Stage 3 of the smoke test confirms the token is picked up inside the container.
+- **Smoke test pipeline itself passes.** Job 6371616 ran on H200 node d4053 and Stages 0–5 all reported success. Stage 5 metrics:
+    - Model loaded into 58.9 GiB of H200 VRAM.
+    - Weight download from HF: 101.7 s (cold cache).
+    - Weight load: 144.5 s.
+    - KV cache: 47.9 GiB free, 1.67M-token capacity, 651× max concurrency.
+    - Single-prompt generation latency: 20.15 s. Real text generated.
+    - Final line of `smoke_test.py`: `All stages PASSED`.
+- **Open question resolved by today's run:** compute nodes on Explorer *do* have outbound internet for HF downloads — Stage 5 successfully fetched ~60 GB to `$SCRATCH/huggingface` from a compute node.
+
+**Open as of end of day — future jobs:**
+
+1. **Stage 6 / 5-prompt baseline did not produce output.** Confirmed by `ls -lh outputs/`: the directory does not exist on the cluster. The slurm script's Stage 6 block (which invokes `scripts/baseline_generate.py` with `configs/smoke_h200.yaml`) either silently skipped or was cut off after `smoke_test.py` returned. Need to inspect `logs/nemotron_smoke_6371616.err` (which we never read cleanly — the original `cat` call was prefixed by a stray `$`) and the tail of `logs/nemotron_smoke_6371616.out` past `All stages PASSED` to determine: did the second `apptainer exec` block run at all? Did `baseline_generate.py` start and crash before `mkdir -p outputs/`? Hypothesis to check first: walltime / OOM is unlikely (the smoke job had a 1 h budget and Stage 5 finished within ~7 min), so suspect either (a) `set -euo pipefail` tripped on something subtle between blocks, or (b) `baseline_generate.py` errored before its `out_path.parent.mkdir(...)` ran (e.g. yaml parse error, or `trust_remote_code` not being plumbed through correctly when read from the YAML rather than hardcoded).
+2. **Once Stage 6 produces the JSONL**, paste back its contents and we'll record the 5 prompt/response pairs and per-prompt latencies in this log. That's the "smoke test green" milestone before kicking off the full baseline.
+3. **Run the full baseline** after Stage 6 is verified: `sbatch slurm/run_baseline.slurm`. Walltime is 4 h; predictions land in `outputs/predictions_<JOB_ID>.jsonl`.
+4. **Clean up `~/.local`** so it can't shadow the container again on a future bring-up. Rename rather than delete:
+   ```bash
+   mv ~/.local/lib/python3.12/site-packages ~/.local/lib/python3.12/site-packages.bak
+   ```
+   Keep the `.bak` for ~1 week; remove once nothing on the cluster is observed to depend on it.
