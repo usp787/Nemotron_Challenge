@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=nemotron_smoke
-#SBATCH --partition=h200
-#SBATCH --gres=gpu:1
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=01:00:00

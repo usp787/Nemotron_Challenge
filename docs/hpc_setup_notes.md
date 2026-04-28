@@ -25,12 +25,21 @@ Last updated: 2026-04-27. Login nodes seen: `explorer-01`, `explorer-02`.
 
 ### Current blocker
 
-**H200 partition quota issue** — submitting `--partition=h200` jobs (whether `salloc` or `sbatch`) is not currently usable for this account. This blocks two things:
+**Container pull.** `nemotron_vllm.sif` (~7–8 GB) is not yet present at `$SCRATCH/containers/`. The first attempt to pull from the login node was OOM-killed at the `mksquashfs` step because the login-node `/tmp` is small and mounted `nodev`. The fix is to run the pull inside a Slurm allocation with `APPTAINER_TMPDIR=$SCRATCH/apptainer/tmp` (which is already exported in `~/.bashrc`). A CPU partition is enough — see Step A below.
 
-1. The remaining `apptainer pull` of `vllm/vllm-openai:v0.12.0` if we run it on a compute node specifically through the `h200` partition.
-2. All smoke-test and baseline runs as written, because [slurm/smoke_test.slurm](../slurm/smoke_test.slurm) and [slurm/run_baseline.slurm](../slurm/run_baseline.slurm) hard-code `#SBATCH --partition=h200`.
+The slurm scripts also still reference a non-existent `h200` partition; once the container is in place, they need a one-line edit to `--partition=gpu --gres=gpu:h200:1` (see Step B).
 
-The first earlier attempt to pull from the login node was OOM-killed at the `mksquashfs` step (the `signal: killed` failure), which is why the workaround is "do the pull inside an allocation."
+### Resolved: H200 access (2026-04-27)
+
+We initially believed the account was rejected from `--partition=h200` for quota reasons. **It was a syntax mistake, not a quota issue.** Explorer has no `h200` partition; H200 GPUs are exposed as a `--gres` value on the `gpu` / `gpu-short` / `gpu-interactive` partitions. Verified by submitting a 5-minute probe:
+
+```bash
+sbatch --partition=gpu --gres=gpu:h200:1 --time=00:05:00 --mem=16G \
+       --output=logs/h200_probe_%j.out --wrap="nvidia-smi"
+# Job 6371194 — single H200 allocated, 143771 MiB VRAM, driver 570.86.15, CUDA 12.8
+```
+
+Lesson for next time: when a "partition" can't be found in `sinfo`, check whether the resource is actually a `--gres` value on an existing partition (use `sinfo -p <partition> -N -o "%N %P %G %m"`) before assuming a quota or permission problem.
 
 ### Working around the blocker
 
@@ -318,8 +327,8 @@ Track here as we hit them:
 
 - [x] Where is scratch? → `/scratch/$USER` (must export `$SCRATCH` manually).
 - [x] Can we build `.sif` images on the cluster? → Yes, but **not** on the login node (`/tmp` is small + `nodev`; `mksquashfs` gets OOM-killed). Run inside an allocation with `APPTAINER_TMPDIR=$SCRATCH/...`.
-- [ ] What is the H200 quota / account configuration for this user, and how do we restore access? (Open ticket with Explorer support.)
-- [ ] If H200 stays unavailable, which GPU partition do we use as the supported alternative, and does it have enough VRAM for Nemotron 30B BF16 on a single GPU?
+- [x] What is the H200 access situation? → Confirmed working 2026-04-27 (job 6371194). Earlier failure was the partition-vs-gres syntax mistake (`--partition=h200` doesn't exist); use `--partition=gpu --gres=gpu:h200:N`. No quota ticket needed.
+- [x] Which GPU partition fits Nemotron 3 Nano BF16 on a single GPU? → H200 (141 GB) on the `gpu` partition — 4 nodes (d4052–d4055), 8 GPUs each. A100 80 GB on d1026 / d1028 / d1029 is the backup.
 - [ ] Do compute nodes have outbound internet for HF downloads, or must models be pre-cached from a login node?
 - [ ] Recommended NGC image for H200 + vLLM (still useful as a fallback to the `vllm/vllm-openai` image)?
 - [ ] Per-user `$SCRATCH` quota and retention policy?

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=nemotron_baseline
-#SBATCH --partition=h200
-#SBATCH --gres=gpu:1
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
 #SBATCH --time=04:00:00
