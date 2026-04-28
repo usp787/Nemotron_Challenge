@@ -27,6 +27,14 @@ export HF_HOME=$SCRATCH/huggingface
 export TRANSFORMERS_CACHE=$SCRATCH/huggingface
 export HF_HUB_CACHE=$SCRATCH/huggingface/hub
 
+# Apptainer auto-binds $HOME, which means ~/.local/lib/python3.12/site-packages
+# (a stale user pip install) shadows the container's packages. That host-side
+# vllm 0.19.1 has a flashinfer version mismatch and isn't what the model card
+# recommends anyway. Force Python to ignore user-site so we use the container's
+# vllm 0.12.0, which is exactly what the Nemotron 3 Nano model card requires
+# (`vllm>=0.12.0`) and ships with internally-consistent flashinfer versions.
+export PYTHONNOUSERSITE=1
+
 echo ""
 echo "=== Stage 1: Apptainer GPU passthrough ==="
 apptainer exec --nv $CONTAINER nvidia-smi

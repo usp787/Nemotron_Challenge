@@ -23,6 +23,9 @@ export HF_HOME=$SCRATCH/huggingface
 export TRANSFORMERS_CACHE=$SCRATCH/huggingface
 export HF_HUB_CACHE=$SCRATCH/huggingface/hub
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
+# See slurm/smoke_test.slurm for the rationale: ignore ~/.local user-site so
+# Python uses the container's vllm 0.12.0 and matched flashinfer versions.
+export PYTHONNOUSERSITE=1
 
 apptainer exec --nv \
   --bind $PROJECT_DIR:/workspace \
