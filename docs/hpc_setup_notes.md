@@ -52,21 +52,68 @@ ls -lh nemotron_vllm.sif    # expect ~7-8 GB
 exit
 ```
 
-**Step B — figure out the right GPU partition for inference.** The smoke test (Stage 5) and the baseline both need a GPU with enough VRAM to hold Nemotron 3 Nano in BF16 (~60 GB). Options, in order of preference:
+**Step B — request a GPU node with enough VRAM.** The smoke test (Stage 5) and the baseline both need a GPU that can hold Nemotron 3 Nano in BF16 (~60 GB).
 
-1. **Restore H200 access.** Open a ticket with Explorer support ("my account cannot submit to `h200`; please advise on quota/account configuration"). H200 (141 GB) is the most comfortable fit and is what the slurm scripts assume.
-2. **Use an A100 80 GB or H100 80 GB partition** if available. Nemotron 3 Nano BF16 fits on 80 GB but is tight — start the smoke test with `gpu_memory_utilization=0.70` and `max_model_len=4096` to leave room for KV cache.
-3. **Multi-GPU tensor parallel.** If only smaller GPUs are available (e.g. 2× 40 GB A100), set `tensor_parallel_size: 2` in the YAML config and request `--gres=gpu:2`. Adds complexity; only use if (1) and (2) aren't options.
-4. **Quantize.** Switch to a quantized Nemotron checkpoint (FP8/AWQ if NVIDIA publishes one) — but that changes the experiment. Avoid for the baseline.
+Important: **`h200` is not a Slurm partition on Explorer.** Earlier attempts to submit `--partition=h200` failed because the resource is requested via `--gres=gpu:h200:N` on the `gpu` partition (or `gpu-short` / `gpu-interactive` for ≤2 h jobs). The fix is the request syntax, not a quota ticket.
 
-After identifying the right partition (call it `<gpu_partition>`), the slurm files need a one-line edit each:
+#### Relevant GPU nodes on Explorer
+
+Surveyed 2026-04-27 with `sinfo -p gpu,gpu-short,gpu-interactive,courses-gpu -N -o "%N %P %G %m"`.
+
+| Nodes | GPU | Count/node | Per-GPU VRAM | System RAM | Partitions |
+|---|---|---|---|---|---|
+| d4052, d4053, d4054, d4055 | H200 | 8 | 141 GB | 512 GB | gpu, gpu-short, gpu-interactive |
+| d1028, d1029 | A100 | 4 | 80 GB | 512 GB | gpu, gpu-short, gpu-interactive |
+| d1026 | A100 | 3 | 80 GB | 512 GB | gpu, gpu-short, gpu-interactive |
+
+No other single GPU on the cluster has ≥80 GB VRAM (V100 PCIe / V100 SXM2 max at 32 GB, P100 and T4 at 16 GB). **Multi-GPU aggregate fallback** if H200 *and* A100 are both unavailable: V100-SXM2 nodes (d1002, d1007, d1009–d1013, d1015, d1017, d1019, d1020, d1022, d1027) have 4×32 GB = 128 GB aggregate, usable with `tensor_parallel_size=4`.
+
+#### Interactive request (no real queuing)
+
+`salloc` either grants the node promptly or makes you wait at the prompt — use it when you need a shell on the node *now*:
+
+```bash
+# H200 — primary target
+salloc --partition=gpu --gres=gpu:h200:1 --cpus-per-task=8 --mem=64G --time=02:00:00
+
+# A100 — backup (tight at 80 GB; use gpu_memory_utilization=0.70, max_model_len=4096)
+salloc --partition=gpu --gres=gpu:a100:1 --cpus-per-task=8 --mem=64G --time=02:00:00
+
+# V100 SXM2 multi-GPU fallback (set tensor_parallel_size=4 in the YAML)
+salloc --partition=gpu --gres=gpu:v100-sxm2:4 --cpus-per-task=8 --mem=64G --time=02:00:00
+```
+
+#### Queued (batch) request — recommended when H200 is busy
+
+`sbatch` queues until resources are free. This is the same mechanism OOD's "VSCode session" form uses under the hood, so submitting from the terminal gives the same wait behavior:
+
+```bash
+# Probe job: 5-minute nvidia-smi to confirm the allocation chain works
+sbatch --partition=gpu --gres=gpu:h200:1 --time=00:05:00 --mem=16G \
+       --output=logs/h200_probe_%j.out --wrap="nvidia-smi"
+
+squeue -u $USER                                            # watch queue position
+sacct -j <JOB_ID> --format=JobID,State,Reason,Elapsed       # detail
+cat logs/h200_probe_<JOB_ID>.out                            # should list an H200
+```
+
+Possible outcomes:
+
+- **Runs successfully** → use `sbatch` from the terminal going forward; OOD is not needed.
+- **Sits in queue with reason `Priority` or `Resources`** → normal, just wait.
+- **Rejected immediately with `Invalid gres` / `QOS limit` / `Access denied`** → that account is genuinely restricted from H200; retry with `--gres=gpu:a100:1` and open a ticket about H200 access.
+
+#### After a successful probe
+
+Edit the submission scripts to point at the resource that worked:
 
 ```bash
 # slurm/smoke_test.slurm and slurm/run_baseline.slurm
-#SBATCH --partition=<gpu_partition>
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:h200:1     # or gpu:a100:1 if falling back
 ```
 
-If the new partition's GPUs aren't H200, also rename `configs/baseline_h200.yaml` → `configs/baseline_<gpu_name>.yaml` for honesty (and update the `--config` path in the slurm script).
+If falling back to A100, also rename `configs/baseline_h200.yaml` → `configs/baseline_a100.yaml` and tighten its memory settings (`gpu_memory_utilization=0.70`, `max_model_len=4096`).
 
 ### Future steps once the blocker is resolved
 
