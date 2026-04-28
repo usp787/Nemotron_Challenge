@@ -157,14 +157,14 @@ cat logs/nemotron_smoke_<JOB_ID>.err
 # 6. Verify Stage 6 output and run the evaluator
 wc -l outputs/smoke_predictions_<JOB_ID>.jsonl
 apptainer exec --nv $SCRATCH/containers/nemotron_vllm.sif \
-  python scripts/evaluate.py --predictions outputs/smoke_predictions_<JOB_ID>.jsonl
+  python3 scripts/evaluate.py --predictions outputs/smoke_predictions_<JOB_ID>.jsonl
 
 # 7. Only after smoke passes — submit the full baseline
 sbatch slurm/run_baseline.slurm
 squeue -u $USER
 cat logs/nemotron_baseline_<JOB_ID>.out
 apptainer exec --nv $SCRATCH/containers/nemotron_vllm.sif \
-  python scripts/evaluate.py --predictions outputs/predictions_<JOB_ID>.jsonl
+  python3 scripts/evaluate.py --predictions outputs/predictions_<JOB_ID>.jsonl
 ```
 
 Useful while waiting:

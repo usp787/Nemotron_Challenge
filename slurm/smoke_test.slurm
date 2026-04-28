@@ -39,8 +39,8 @@ apptainer exec --nv \
   $CONTAINER \
   bash -lc "
     cd /workspace
-    python scripts/check_env.py
-    python scripts/smoke_test.py
+    python3 scripts/check_env.py
+    python3 scripts/smoke_test.py
   "
 
 echo ""
@@ -51,7 +51,7 @@ apptainer exec --nv \
   $CONTAINER \
   bash -lc "
     cd /workspace
-    python scripts/baseline_generate.py \
+    python3 scripts/baseline_generate.py \
       --config configs/smoke_h200.yaml \
       --output outputs/smoke_predictions_${SLURM_JOB_ID}.jsonl
   "

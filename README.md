@@ -176,7 +176,7 @@ Apptainer provides the Python/CUDA/vLLM/Transformers environment. Slurm provides
 Typical pattern:
 
 ```bash
-apptainer exec --nv container.sif python script.py
+apptainer exec --nv container.sif python3 script.py
 ```
 
 The `--nv` flag exposes NVIDIA GPUs to the container.
@@ -490,8 +490,8 @@ apptainer exec --nv \
   $CONTAINER \
   bash -lc "
     cd /workspace
-    python scripts/check_env.py
-    python scripts/baseline_generate.py --config configs/baseline_h200.yaml
+    python3 scripts/check_env.py
+    python3 scripts/baseline_generate.py --config configs/baseline_h200.yaml
   "
 ```
 
@@ -614,7 +614,7 @@ apptainer exec --nv \
   $CONTAINER \
   bash -lc "
     cd /workspace
-    python scripts/check_env.py
+    python3 scripts/check_env.py
   "
 ```
 
@@ -997,7 +997,7 @@ apptainer exec --nv \
   $CONTAINER \
   bash -lc "
     cd /workspace
-    python scripts/baseline_generate.py --config $CONFIG
+    python3 scripts/baseline_generate.py --config $CONFIG
   "
 ```
 
@@ -1050,9 +1050,9 @@ apptainer exec --nv \
   bash -lc "
     cd /workspace
 
-    python scripts/check_env.py
+    python3 scripts/check_env.py
 
-    python scripts/baseline_generate.py \
+    python3 scripts/baseline_generate.py \
       --config configs/baseline_h200.yaml \
       --output outputs/predictions_${SLURM_JOB_ID}.jsonl
   "
