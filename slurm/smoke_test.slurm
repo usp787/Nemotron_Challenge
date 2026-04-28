@@ -22,10 +22,12 @@ nvidia-smi
 
 PROJECT_DIR=$HOME/Nemotron_Challenge
 CONTAINER=$SCRATCH/containers/nemotron_vllm.sif
+SMOKE_OUTPUT=outputs/smoke_predictions_${SLURM_JOB_ID}.jsonl
 
 export HF_HOME=$SCRATCH/huggingface
 export TRANSFORMERS_CACHE=$SCRATCH/huggingface
 export HF_HUB_CACHE=$SCRATCH/huggingface/hub
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 # Apptainer auto-binds $HOME, which means ~/.local/lib/python3.12/site-packages
 # (a stale user pip install) shadows the container's packages. That host-side
@@ -61,8 +63,15 @@ apptainer exec --nv \
     cd /workspace
     python3 scripts/baseline_generate.py \
       --config configs/smoke_h200.yaml \
-      --output outputs/smoke_predictions_${SLURM_JOB_ID}.jsonl
+      --output $SMOKE_OUTPUT
   "
+
+echo ""
+echo "=== Stage 6 JSONL verification ==="
+cd "$PROJECT_DIR"
+wc -l "$SMOKE_OUTPUT"
+head -n 1 "$SMOKE_OUTPUT"
+tail -n 1 "$SMOKE_OUTPUT"
 
 echo ""
 echo "Smoke test finished at: $(date)"

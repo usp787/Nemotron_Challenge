@@ -4,6 +4,7 @@ outputs/
 *.out
 *.err
 *.jsonl
+!data/sample_prompts_5.jsonl
 
 # Python
 __pycache__/

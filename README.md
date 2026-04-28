@@ -218,6 +218,7 @@ outputs/
 *.out
 *.err
 *.jsonl
+!data/sample_prompts_5.jsonl
 
 # Python
 __pycache__/
@@ -1282,3 +1283,9 @@ After the baseline is stable, possible next steps include:
    mv ~/.local/lib/python3.12/site-packages ~/.local/lib/python3.12/site-packages.bak
    ```
    Keep the `.bak` for ~1 week; remove once nothing on the cluster is observed to depend on it.
+
+### 2026-04-28 — Stage 6 JSONL follow-up
+
+Likely root cause: `data/sample_prompts_5.jsonl` was covered by the repo-wide `*.jsonl` ignore rule, so a fresh cluster clone did not receive the smoke prompts. `scripts/baseline_generate.py` read the input file before creating `outputs/`, so a missing input fixture produced the observed symptom: no `outputs/` directory and no smoke JSONL.
+
+Fix: `data/sample_prompts_5.jsonl` is now an explicit tracked exception in `.gitignore`, and `baseline_generate.py` creates the output directory before validating the input path. If the input is ever missing again, the Stage 6 log should show a direct `FileNotFoundError` naming the missing JSONL.

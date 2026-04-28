@@ -21,8 +21,15 @@ def load_config(path: str) -> dict:
 
 
 def read_prompts(path: str) -> list[dict]:
+    prompt_path = Path(path)
+    if not prompt_path.exists():
+        raise FileNotFoundError(
+            f"Input JSONL not found: {prompt_path}. "
+            "For the smoke run, ensure data/sample_prompts_5.jsonl is present."
+        )
+
     items: list[dict] = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(prompt_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -47,6 +54,9 @@ def main() -> None:
     runtime_cfg = cfg["runtime"]
     data_cfg = cfg["data"]
 
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
     prompts = read_prompts(data_cfg["input_path"])
     print(f"Loaded {len(prompts)} prompts from {data_cfg['input_path']}")
 
@@ -66,9 +76,6 @@ def main() -> None:
         top_p=model_cfg.get("top_p", 1.0),
         max_tokens=model_cfg.get("max_tokens", 1024),
     )
-
-    out_path = Path(args.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     successes = 0
     failures = 0

@@ -1,0 +1,5 @@
+{"id": "sample_001", "prompt": "Solve the following reasoning problem step by step: If Alice has 3 boxes and each box contains 4 red balls and 2 blue balls, how many balls are there in total?"}
+{"id": "sample_002", "prompt": "A train leaves at 3 PM traveling 60 mph. Another leaves at 4 PM traveling 90 mph on the same route. When does the second train catch the first?"}
+{"id": "sample_003", "prompt": "Classify whether the statement is logically valid and explain briefly: All cats are mammals. Luna is a cat. Therefore, Luna is a mammal."}
+{"id": "sample_004", "prompt": "A bag has 5 red marbles, 3 green marbles, and 2 blue marbles. Two marbles are drawn without replacement. What is the probability both are red? Show the calculation."}
+{"id": "sample_005", "prompt": "Write a short Python function that returns the n-th Fibonacci number using memoization, and explain why memoization improves the runtime."}

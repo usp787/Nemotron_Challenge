@@ -133,9 +133,10 @@ cd $HOME/Nemotron_Challenge
 git pull                                  # latest code
 mkdir -p logs outputs
 
-# 1. Recreate the gitignored sample prompts (5 lines, format in README §9.1)
-#    — copy from a teammate or hand-write into data/sample_prompts_5.jsonl.
+# 1. Confirm the tracked smoke prompt fixture is present.
 ls -l data/sample_prompts_5.jsonl
+# This smoke prompt fixture is now tracked in git; if it is missing after
+# `git pull`, the local checkout is stale or incomplete.
 
 # 2. Hugging Face authentication if Nemotron is gated (one-time)
 huggingface-cli login
