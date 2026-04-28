@@ -7,6 +7,13 @@ NVIDIA's own evaluation in the Nemotron 3 Nano report does not disclose
 which mirror it used, so this is a faithful but not bit-identical
 substitute.
 
+We pull rows via the public Hugging Face datasets-server REST API
+instead of the `datasets` library, because the vLLM container does not
+ship `datasets` and we don't want to inject a `pip install --user`
+into the run (the Slurm scripts explicitly set PYTHONNOUSERSITE=1).
+This keeps the prep step pure-stdlib and runnable from any Python 3
+on a node with outbound internet (the login node).
+
 Each output record has:
   - id (str): "aime25_<two-digit problem index>"
   - prompt (str): the NeMo-Skills boxed-answer math template applied to
@@ -18,18 +25,19 @@ Each output record has:
   - problem_idx (int): original index in the competition
   - problem_type (list[str]): topic tags from MathArena
 
-Run this once on the cluster login node (where outbound internet
-works) before submitting the baseline Slurm job. The compute node does
-not need internet access during inference.
-
 Usage:
     python3 scripts/prepare_aime25.py
 """
 import json
+import urllib.request
 from pathlib import Path
 
-from datasets import load_dataset
 
+ROWS_URL = (
+    "https://datasets-server.huggingface.co/rows"
+    "?dataset=MathArena%2Faime_2025"
+    "&config=default&split=train&offset=0&length=100"
+)
 
 PROMPT_TEMPLATE = (
     "Solve the following math problem. Make sure to put the answer "
@@ -37,13 +45,19 @@ PROMPT_TEMPLATE = (
 )
 
 
+def fetch_rows() -> list[dict]:
+    with urllib.request.urlopen(ROWS_URL, timeout=60) as resp:
+        payload = json.load(resp)
+    return [entry["row"] for entry in payload["rows"]]
+
+
 def main() -> None:
-    ds = load_dataset("MathArena/aime_2025", split="train")
+    rows = fetch_rows()
     out_path = Path("data/aime25.jsonl")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(out_path, "w", encoding="utf-8") as f:
-        for row in ds:
+        for row in rows:
             rec = {
                 "id": f"aime25_{int(row['problem_idx']):02d}",
                 "prompt": PROMPT_TEMPLATE.format(problem=row["problem"]),
@@ -53,7 +67,7 @@ def main() -> None:
             }
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    print(f"Wrote {len(ds)} prompts -> {out_path}")
+    print(f"Wrote {len(rows)} prompts -> {out_path}")
 
 
 if __name__ == "__main__":

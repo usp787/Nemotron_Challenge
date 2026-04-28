@@ -163,8 +163,9 @@ apptainer exec --nv $SCRATCH/containers/nemotron_vllm.sif \
 # 7. Prepare the AIME25 dataset (one-time, login node — needs internet)
 #    Writes data/aime25.jsonl (30 problems) using MathArena/aime_2025
 #    with the NeMo-Skills boxed-answer prompt template baked in.
-apptainer exec $SCRATCH/containers/nemotron_vllm.sif \
-  python3 scripts/prepare_aime25.py
+#    Pure-stdlib (urllib + json), so no container or extra packages
+#    needed; runs straight on the login node.
+python3 scripts/prepare_aime25.py
 wc -l data/aime25.jsonl   # expect 30
 
 # 8. Only after smoke passes and aime25.jsonl exists — submit the baseline
