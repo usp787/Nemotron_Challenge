@@ -1329,3 +1329,5 @@ Fix: `data/sample_prompts_5.jsonl` is now an explicit tracked exception in `.git
 #### Next session
 
 Move to LoRA training strategy. Defer the baseline rerun until LoRA evaluation needs a comparison number — at that point, run both the baseline-mode and LoRA-mode evaluations under identical settings.
+
+Questions:(a) training data preparation — which dataset, what format, how to ingest it — or (b) the trainer scaffolding — which library (PEFT? Unsloth? NeMo?), checkpointing strategy, eval-during-training. 
