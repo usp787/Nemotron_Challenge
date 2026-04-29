@@ -11,6 +11,8 @@ to ``expected_answer`` to compute AIME-style accuracy. Uses the
 several boxed expressions during the chain-of-thought and only the
 last one is the final answer.
 """
+from __future__ import annotations
+
 import argparse
 import json
 import re
