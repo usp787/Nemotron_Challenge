@@ -152,8 +152,8 @@ squeue -u $USER
 
 # 5. After the smoke job finishes, inspect logs
 ls -lt logs/ | head
-cat logs/nemotron_smoke_6375635.out #job ID may change
-cat logs/nemotron_smoke_6375635.err
+cat logs/nemotron_smoke_6382411.out
+cat logs/nemotron_smoke_6382411.err
 
 # 6. Verify Stage 6 output and run the evaluator
 wc -l outputs/smoke_predictions_6375635.jsonl
@@ -175,6 +175,10 @@ cat logs/nemotron_baseline_<JOB_ID>.out
 apptainer exec --nv $SCRATCH/containers/nemotron_vllm.sif \
   python3 scripts/evaluate.py --predictions outputs/predictions_<JOB_ID>.jsonl
 ```
+# baseline log check
+ls -lt logs/ | head
+cat logs/nemotron_baseline_6382411.out
+cat logs/nemotron_baseline_6382411.err
 
 Useful while waiting:
 
