@@ -4,7 +4,12 @@
       "WebSearch",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "WebFetch(domain:datasets-server.huggingface.co)"
+      "WebFetch(domain:datasets-server.huggingface.co)",
+      "Bash(curl -s 'https://datasets-server.huggingface.co/info?dataset=nvidia/OpenMathReasoning')",
+      "Bash(python3 -c \"import sys, json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d, indent=2\\)[:4000]\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\(r'c:/Users/usp78/Desktop/Nemotron_Challenge/Nemotron_Challenge/scripts/prepare_reasoning_traces.py'\\).read\\(\\)\\); print\\('parse OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('c:/Users/usp78/Desktop/Nemotron_Challenge/Nemotron_Challenge/scripts/prepare_reasoning_traces.py'\\).read\\(\\)\\); print\\('parse OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('c:/Users/usp78/Desktop/Nemotron_Challenge/Nemotron_Challenge/scripts/prepare_reasoning_traces.py', encoding='utf-8'\\).read\\(\\)\\); print\\('parse OK'\\)\")"
     ]
   }
 }
