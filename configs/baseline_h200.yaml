@@ -1,8 +1,8 @@
 model:
   name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
   dtype: bfloat16
-  max_model_len: 32768
-  max_tokens: 24576
+  max_model_len: 65536
+  max_tokens: 60000
   temperature: 1.0
   top_p: 1.0
   trust_remote_code: true

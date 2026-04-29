@@ -1289,3 +1289,43 @@ After the baseline is stable, possible next steps include:
 Likely root cause: `data/sample_prompts_5.jsonl` was covered by the repo-wide `*.jsonl` ignore rule, so a fresh cluster clone did not receive the smoke prompts. `scripts/baseline_generate.py` read the input file before creating `outputs/`, so a missing input fixture produced the observed symptom: no `outputs/` directory and no smoke JSONL.
 
 Fix: `data/sample_prompts_5.jsonl` is now an explicit tracked exception in `.gitignore`, and `baseline_generate.py` creates the output directory before validating the input path. If the input is ever missing again, the Stage 6 log should show a direct `FileNotFoundError` naming the missing JSONL.
+
+### 2026-04-28 — AIME25 baseline pipeline verified end-to-end
+
+**End-of-day status: AIME25 baseline pipeline runs cleanly on H200 — 30/30 prompts complete with no errors, accuracy scoring works, and the eval pipeline produces a number. Today's headline single-sample score is 13/30 = 43.3% pass@1, but is *not* a meaningful performance result: 17/30 responses ran past the 24K-token cap and were cut off mid-final-answer. Of the 13 responses that did fit in budget, 13 were correct (100%), confirming the model and pipeline are both healthy. Today's milestone is pipeline verification, not benchmark reproduction. Token budget bumped for next run; next session moves to LoRA.**
+
+#### Run summary (job 6382411, H200 node d4055)
+
+- Walltime ~45 min (model load 69 s, vLLM warmup 47 s, inference 30 prompts at avg 84 s / median 104 s).
+- 30/30 successes, 0 failures.
+- Mean response length 66.8K chars ≈ 16.7K tokens (~68% of the 24,576-token cap).
+- All 30 responses contained at least one `\boxed{`; 17 had an unbalanced trailing `\boxed{` (truncation while writing the final answer).
+- Score breakdown: 13 correct, 0 wrong (boxed integer mismatch), 17 missing final boxed answer, 0 non-integer boxed.
+
+#### Decisions made today
+
+- **Benchmark target:** AIME25 (no tools). 30 problems, integer-answer grading, headline reasoning benchmark, fits trivially in a single H200 walltime.
+- **Dataset source:** `MathArena/aime_2025` on HF — most-cited public mirror. NVIDIA's report does not disclose which AIME25 mirror they used; this is a faithful but not bit-identical substitute.
+- **Prompt template:** NeMo-Skills public `generic/math.yaml` boxed-answer convention — `"Solve the following math problem. Make sure to put the answer (and only answer) inside \boxed{}."` with no system prompt. NVIDIA's exact template (`math-oai.yaml`) ships only inside their proprietary eval-factory container; the NeMo-Skills version is the closest published equivalent.
+- **Decoding:** `temperature=1.0`, `top_p=1.0` (HF model card recommendation for reasoning; NVIDIA's eval YAML uses 0.99999 ≈ 1.0). `enable_thinking=True` (chat-template default).
+- **Sampling strategy:** single-sample, 30 generations. NVIDIA's published 89.1 is avg@64 (1,920 generations), which is out of scope for verification work.
+
+#### Technical issue / solution log
+
+| Issue | Symptom | Fix |
+|---|---|---|
+| Long walltime stuck in queue | 4 h request sat in `(Priority)` for ~1 h | Cut `slurm/run_baseline.slurm` to `--time=02:00:00`. Slurm's backfill scheduler needs a contiguous gap ≥ requested walltime; 2 h gaps are far more common than 4 h gaps on the H200 nodes. Rerun started promptly. |
+| `datasets` lib not in vLLM container | `ModuleNotFoundError: No module named 'datasets'` when running `prepare_aime25.py` inside `apptainer exec` | Rewrote `scripts/prepare_aime25.py` to use Python stdlib only (`urllib.request` + `json`) via the HF datasets-server REST API. Runs anywhere with internet — no container, no extra packages, no conflict with the slurm scripts' `PYTHONNOUSERSITE=1`. |
+| Bash `\` line-continuation copy-paste | Single multi-line command silently splits into two: `apptainer exec` runs without a command (arg-count error) AND `python3 ...` runs separately on the host (its own error) — confusingly interleaved output | Paste as a single line. The `\` is fragile when followed by a stray space or non-breaking character. |
+| Chat template silently skipped | Initial `baseline_generate.py` fed the raw user prompt to `llm.generate()`, bypassing the chat template and disabling thinking mode without warning | Explicitly call `tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=True)` and feed the rendered text to `llm.generate()`. Save the rendered text in the output JSONL as `formatted_prompt` for reproducibility. |
+| PEP 604 annotations on login-node Python | `TypeError: unsupported operand type(s) for \|: 'type' and 'NoneType'` when running `evaluate.py` on the login node — container has Python 3.12 but login node is older | `from __future__ import annotations` at the top of any host-side script. Defers all annotations to lazy strings, works on Python ≥3.7. Apply this to any future host-side script with type hints. |
+| Token budget too tight for AIME reasoning traces | 17/30 responses truncated mid-final-boxed-answer, even though the model had clearly worked out the answer earlier in the trace. Math-heavy responses pack ~3 chars/token, so 24K tokens hit the cap at ~70K characters | Bumped `configs/baseline_h200.yaml`: `max_model_len 32768 → 65536`, `max_tokens 24576 → 60000`. Previous run had 62 GiB KV cache free, 2.16M-token KV pool, 288× max concurrency at 32K context — doubling context is well within the H200's budget for single-prompt inference. |
+| `evaluate.py` reported 17 "no boxed" but `grep -c '\\boxed{'` found 30 | The extractor takes the *last* `\boxed{` and balances braces forward; if the trailing `\boxed{` is unclosed (truncation), it returns None even though earlier balanced `\boxed{...}` exist. This is intentionally honest — using an intermediate working step as the "final answer" would inflate scores misleadingly | No code change; rely on token-budget bump to fix the underlying truncation. The extractor's behavior is the right one. |
+
+#### Note on today's headline number
+
+13/30 (43.3%) is **not** a baseline result that should be quoted, compared, or improved against. It is a verification artifact — proof the pipeline produces consumable output end-to-end. A meaningful baseline number would require: (a) the bumped token budget, (b) ideally avg@N rather than single-shot, (c) several reruns to bound sample variance. The plan is to recompute the baseline number alongside the LoRA evaluation (same config, same conditions) so the baseline-vs-LoRA comparison is apples-to-apples.
+
+#### Next session
+
+Move to LoRA training strategy. Defer the baseline rerun until LoRA evaluation needs a comparison number — at that point, run both the baseline-mode and LoRA-mode evaluations under identical settings.
