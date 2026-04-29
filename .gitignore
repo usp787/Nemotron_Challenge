@@ -6,6 +6,11 @@ outputs/
 *.jsonl
 !data/sample_prompts_5.jsonl
 
+# LoRA training artifacts
+outputs/lora_adapter*/
+outputs/submission*.zip
+data/lora_traces.jsonl
+
 # Python
 __pycache__/
 *.pyc

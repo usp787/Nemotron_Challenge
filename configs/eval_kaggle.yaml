@@ -1,0 +1,41 @@
+# Mirror of Kaggle's published eval params, used to predict leaderboard
+# accuracy locally. Drift from these numbers will misrepresent the score.
+#
+# Source: Kaggle competition page, "Evaluation" section, table of metric
+# parameters. Fixed by the host; we cannot change them at submission time.
+
+model:
+  name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  dtype: bfloat16
+  max_model_len: 8192
+  max_tokens: 7680
+  temperature: 0.0
+  top_p: 1.0
+  trust_remote_code: true
+
+runtime:
+  backend: vllm
+  gpu_memory_utilization: 0.85
+  tensor_parallel_size: 1
+  max_num_seqs: 64
+  # LoRA hookup. Set lora.path to the trained adapter directory to evaluate
+  # the adapted model; leave it null to evaluate base behavior under the
+  # same eval params (useful for a paired baseline number).
+  lora:
+    enabled: true
+    path: outputs/lora_adapter
+    max_lora_rank: 32
+    max_loras: 1
+
+data:
+  # Use a held-out reasoning set for verification scoring. AIME25 is a
+  # reasonable proxy until the Kaggle test set distribution is better
+  # understood; swap input_path to any boxed-answer JSONL with
+  # expected_answer fields.
+  input_path: data/aime25.jsonl
+  output_dir: outputs
+
+logging:
+  save_prompt: true
+  save_latency: true
+  save_errors: true

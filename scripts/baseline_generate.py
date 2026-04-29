@@ -65,7 +65,15 @@ def main() -> None:
 
     from vllm import LLM, SamplingParams
 
-    llm = LLM(
+    # Optional LoRA adapter. When runtime.lora.enabled is true and a path is
+    # given, vLLM is initialised with enable_lora=True and each generate()
+    # call passes a LoRARequest. This mirrors the Kaggle eval harness, which
+    # loads the user's adapter onto the same base model via vLLM.
+    lora_runtime = (runtime_cfg.get("lora") or {})
+    lora_enabled = bool(lora_runtime.get("enabled")) and bool(lora_runtime.get("path"))
+    lora_request = None
+
+    llm_kwargs = dict(
         model=model_cfg["name"],
         dtype=model_cfg.get("dtype", "bfloat16"),
         max_model_len=model_cfg.get("max_model_len", 32768),
@@ -73,6 +81,21 @@ def main() -> None:
         tensor_parallel_size=runtime_cfg.get("tensor_parallel_size", 1),
         trust_remote_code=model_cfg.get("trust_remote_code", False),
     )
+    if "max_num_seqs" in runtime_cfg:
+        llm_kwargs["max_num_seqs"] = runtime_cfg["max_num_seqs"]
+    if lora_enabled:
+        llm_kwargs["enable_lora"] = True
+        llm_kwargs["max_lora_rank"] = int(lora_runtime.get("max_lora_rank", 32))
+        llm_kwargs["max_loras"] = int(lora_runtime.get("max_loras", 1))
+
+    llm = LLM(**llm_kwargs)
+
+    if lora_enabled:
+        from vllm.lora.request import LoRARequest
+
+        adapter_path = str(Path(lora_runtime["path"]).resolve())
+        lora_request = LoRARequest("submission_adapter", 1, adapter_path)
+        print(f"LoRA adapter loaded: {adapter_path}")
 
     sampling = SamplingParams(
         temperature=model_cfg.get("temperature", 0.0),
@@ -110,7 +133,10 @@ def main() -> None:
             }
             try:
                 t0 = time.perf_counter()
-                outputs = llm.generate([formatted_prompt], sampling)
+                gen_kwargs = {}
+                if lora_request is not None:
+                    gen_kwargs["lora_request"] = lora_request
+                outputs = llm.generate([formatted_prompt], sampling, **gen_kwargs)
                 record["latency_sec"] = round(time.perf_counter() - t0, 3)
                 record["response"] = outputs[0].outputs[0].text
                 successes += 1

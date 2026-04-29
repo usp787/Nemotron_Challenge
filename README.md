@@ -274,7 +274,7 @@ runtime:
   tensor_parallel_size: 1
 ```
 
-The current `max_model_len`/`max_tokens` are sized for AIME-style reasoning traces — see the AIME25 entry in §16 for the budget rationale. Drop them back to ~32K / ~24K for shorter prompts to free KV-cache headroom.
+The current `max_model_len`/`max_tokens` are sized for AIME-style reasoning traces — see the AIME25 entry in §17 for the budget rationale. Drop them back to ~32K / ~24K for shorter prompts to free KV-cache headroom.
 
 ---
 
@@ -384,24 +384,45 @@ If compute nodes have no internet, download/cache the model from an allowed envi
 
 ---
 
-## 14. Future Optimization Directions
+## 14. LoRA Verification
 
-After the baseline is stable, possible next steps include:
+Once the baseline is stable, the next milestone is the **LoRA verification** run — proof that the full submit-to-Kaggle path (data prep → train adapter → load via vLLM → score → package zip) works end-to-end on a single H200. This is a verification milestone, not a tuning run.
 
-1. Prompt format tuning
-2. Reasoning-on vs reasoning-off comparison
-3. Temperature/top-p sweep
-4. Self-consistency sampling
-5. Tool-use evaluation for math/coding prompts
-6. Output parser and verifier
-7. LoRA/SFT experiment if training resources and competition rules allow
-8. NeMo Evaluator Launcher integration
-9. Long-context setting comparison
+Kaggle's eval params are fixed and inverted from the model card defaults: rank ≤ 32, `max_tokens=7680`, `max_model_len=8192`, `temperature=0.0`. Training distribution is shaped to produce concise traces that fit greedy-decoded under that 8K cap. Rationale, hyperparameter choices, and known follow-ups in [docs/lora_strategy.md](docs/lora_strategy.md).
+
+Pipeline files:
+
+| Stage | File |
+|---|---|
+| Data prep (login node) | [scripts/prepare_reasoning_traces.py](scripts/prepare_reasoning_traces.py) |
+| Training config | [configs/lora_verification.yaml](configs/lora_verification.yaml) |
+| Trainer | [scripts/train_lora.py](scripts/train_lora.py) |
+| Eval at Kaggle params | [configs/eval_kaggle.yaml](configs/eval_kaggle.yaml) + [scripts/baseline_generate.py](scripts/baseline_generate.py) (now LoRA-aware) |
+| Submission packager | [scripts/package_submission.py](scripts/package_submission.py) |
+| Slurm orchestration | [slurm/lora_verification.slurm](slurm/lora_verification.slurm) |
+
+Prerequisites and exact command sequence in [docs/lora_strategy.md §3-4](docs/lora_strategy.md). One-time setup needed: pull the NeMo container to `$SCRATCH/containers/nemo.sif`.
+
+---
+
+## 15. Future Optimization Directions
+
+After LoRA verification passes, possible next steps include:
+
+1. Real LoRA training run (5K+ traces, more epochs, rank 24-32)
+2. `enable_thinking=True` vs `False` A/B at eval time against the same adapter
+3. Held-out dev set beyond AIME25 (e.g. MATH-500, GPQA-Diamond) to bound sample variance
+4. On-policy distillation from a stronger teacher (R1 / QwQ-32B)
+5. Prompt format tuning
+6. Self-consistency sampling
+7. Tool-use evaluation for math/coding prompts
+8. Output parser and verifier
+9. NeMo Evaluator Launcher integration
 10. Error taxonomy and targeted fixes
 
 ---
 
-## 15. Verified References
+## 16. Verified References
 
 - Kaggle competition page: `https://www.kaggle.com/competitions/nvidia-nemotron-model-reasoning-challenge`
 - Hugging Face model card: `https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`
@@ -410,7 +431,7 @@ After the baseline is stable, possible next steps include:
 
 ---
 
-## 16. Bring-up Log
+## 17. Bring-up Log
 
 ### 2026-04-27 — Initial cluster bring-up on Northeastern Explorer
 

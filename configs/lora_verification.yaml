@@ -1,0 +1,52 @@
+# LoRA verification training config.
+#
+# Goal: prove the end-to-end pipeline (data -> train -> save adapter -> vLLM
+# load -> eval at Kaggle params) runs cleanly on a single H200. NOT a tuning
+# config. Numbers are sized for a small dataset (~200 samples) and one epoch
+# so the verification slurm job finishes inside ~2h.
+#
+# Constraints driven by Kaggle eval (see configs/eval_kaggle.yaml):
+#   - rank <= 32 (we use 16 to stay clear of the cap)
+#   - sequence length aligned to the 8192 eval context (we train at 4096 to
+#     leave activation/KV headroom on a single H200 during backward)
+#   - target_modules = "all-linear" because Nemotron-3 Nano is a hybrid
+#     Mamba-2/MoE custom architecture; hard-coded q_proj/k_proj/v_proj/o_proj
+#     names are not guaranteed to exist or to cover the right layers.
+
+model:
+  name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  dtype: bfloat16
+  trust_remote_code: true
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.0
+  target_modules: all-linear
+  bias: none
+  task_type: CAUSAL_LM
+
+data:
+  input_path: data/lora_traces.jsonl
+  max_seq_len: 4096
+  # Loss is computed on the assistant turn only — user prompt tokens get
+  # label=-100. Set to false to train on full sequence (less faithful to
+  # the inference-time distribution but slightly simpler).
+  mask_user_loss: true
+
+train:
+  num_epochs: 1
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 16
+  learning_rate: 2.0e-4
+  lr_scheduler: cosine
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  gradient_checkpointing: true
+  bf16: true
+  logging_steps: 5
+  save_steps: 0          # adapter is saved once at end; intermediate ckpts off for verification
+  seed: 42
+
+output:
+  adapter_dir: outputs/lora_adapter
