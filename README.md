@@ -515,3 +515,54 @@ Fix: `data/sample_prompts_5.jsonl` is now an explicit tracked exception in `.git
 Move to LoRA training strategy. Defer the baseline rerun until LoRA evaluation needs a comparison number — at that point, run both the baseline-mode and LoRA-mode evaluations under identical settings.
 
 Questions:(a) training data preparation — which dataset, what format, how to ingest it — or (b) the trainer scaffolding — which library (PEFT? Unsloth? NeMo?), checkpointing strategy, eval-during-training. 
+
+### 2026-04-29 — LoRA strategy locked in, verification job submitted
+
+**End-of-day status:** LoRA strategy is fully designed, all pipeline scripts/configs/slurm are in the repo, training data is prepped, runtime environment on the cluster is verified. Job 6412058 (`lora_verification`) is queued on the gpu partition (PD, Priority). Today is the design + plumbing milestone — running the verification is just-submitted, not finished yet.
+
+#### Decisions made today
+
+- **Kaggle eval contract drives everything.** The leaderboard runs the adapter via vLLM with fixed params: `max_lora_rank=32`, `max_tokens=7680`, `max_model_len=8192`, `temperature=0.0` (greedy), `top_p=1.0`, scoring on `\boxed{}` extraction. This is the **inverse** of the model card's recommended setup (temp=1.0, ~30K-token reasoning budgets). Every downstream choice — training-data length filter, chat-template format, hyperparameter sizing — is a consequence of these constraints. See [docs/lora_strategy.md](docs/lora_strategy.md) §1.
+- **Training stack: HF transformers + peft + accelerate, not pure NeMo CLI.** NeMo Automodel is a wrapper over the same libraries; calling them directly is more durable across NeMo releases and avoids YAML schema drift. PEFT writes `adapter_config.json` + `adapter_model.safetensors` in exactly the shape Kaggle expects.
+- **Container reuse over a NeMo container pull.** Initial plan pulled `nvcr.io/nvidia/nemo:25.07` (~30 GB, 4+ hours). Pivoted to reusing `$SCRATCH/containers/nemotron_vllm.sif` and adding a scratch-resident `peft + accelerate` install via `PYTHONPATH` injection. Setup time dropped from hours to minutes; saved ~30 GB of `$SCRATCH`.
+- **Data source: `nvidia/OpenMathReasoning` (CoT split).** NVIDIA's own curated math reasoning corpus minimises distribution shift during fine-tuning. Filtered to `problem_type=="has_answer_extracted"`, `\boxed{` present in solution, length ≤ 14000 chars (~ 4-4.5K tokens) — strict enough that traces fit comfortably under the 7680-token greedy eval cap.
+- **Hyperparameters: deliberately small for verification.** rank=16 (half the Kaggle cap of 32), `target_modules="all-linear"` (robust to Nemotron's hybrid Mamba-2/MoE arch), `max_seq_len=4096`, 200 samples × 1 epoch, `gradient_checkpointing=True`. Full rationale in [docs/lora_strategy.md](docs/lora_strategy.md) §2.
+- **Memory budget on H200 is comfortable.** Estimated ~75-90 GiB during training (60 GiB base BF16 weights + ~10-20 GiB activations with checkpointing + LoRA/optimizer/workspace), leaving ~50-65 GiB headroom on the 140 GiB H200. Headroom is reserved for future rank/batch increases rather than a `seq_len` bump.
+- **Two-job split (train.slurm + eval.slurm) deferred.** For verification, a monolithic `slurm/lora_verification.slurm` is simpler. The split, plus training checkpoints + eval resume, is documented as a future-direction in [docs/lora_strategy.md](docs/lora_strategy.md) §7 — natural follow-up once a real (multi-day) training run is needed.
+
+#### Pipeline files added today
+
+| Stage | File |
+|---|---|
+| Data prep (login node) | [scripts/prepare_reasoning_traces.py](scripts/prepare_reasoning_traces.py) |
+| Training config | [configs/lora_verification.yaml](configs/lora_verification.yaml) |
+| Trainer | [scripts/train_lora.py](scripts/train_lora.py) |
+| Eval at Kaggle params | [configs/eval_kaggle.yaml](configs/eval_kaggle.yaml) + LoRA-aware [scripts/baseline_generate.py](scripts/baseline_generate.py) |
+| Submission packager | [scripts/package_submission.py](scripts/package_submission.py) |
+| Slurm orchestration | [slurm/lora_verification.slurm](slurm/lora_verification.slurm) |
+| Strategy doc | [docs/lora_strategy.md](docs/lora_strategy.md) |
+
+#### Technical issue / solution log
+
+| Issue | Symptom | Fix |
+|---|---|---|
+| `prepare_reasoning_traces.py` rejected all rows | 4300 rows scanned with `kept=0/200`; eventually a 429 from rate-limited paging | Wrong column names assumed. Real schema (verified from HF dataset card): `pass_rate_72b_tir` is a string with `"n/a"` sentinel, not `pass_rate_1` numeric. Rewrote `keep()` to use the real columns, added a first-page `[diag]` dump of row keys, added a reject tally so any future schema drift surfaces in seconds rather than after 4000 silent rejections. Also added 429 backoff that reads `Retry-After`, exponential fallback, and a 0.5 s inter-page sleep. |
+| Python 3.9 f-string compatibility | `prepare_reasoning_traces.py` would have raised `SyntaxError` on the login node — Python 3.9 forbids backslashes inside f-string expressions, only allowed since 3.12 | Bound the boolean to a variable before formatting, so the f-string expression contains no backslash. |
+| First NeMo container pull `salloc` exceeded its time limit doing nothing | Pasted `salloc` + commands together; on Explorer `salloc` allocates resources but does NOT auto-shell into the compute node, so subsequent `mkdir`/`apptainer pull` ran on the login node while the compute allocation sat idle. NeMo container size also exceeds what fits in 2 h on `short`. | Switched the entire training stack to reuse the existing vLLM container (Option B above). Documented `srun --jobid=$SLURM_JOB_ID --pty bash` after `salloc` as the explicit step needed on Explorer. |
+| `pip install --target=...` OOM-killed the login node | Attempted to download a fresh torch + CUDA wheel set (~2.5 GB) into the target dir even though the container already has compatible torch/transformers. Killed at "4/56 [triton]" by the login node's memory cgroup. | Added `--no-deps` to the `pip install --target` command. Only `peft` (~680 KB) and `accelerate` (~380 KB) get written to scratch; `torch`/`transformers`/etc. are picked up from the container at import time via the standard module-search order. Updated [docs/lora_strategy.md](docs/lora_strategy.md) §3 with the rationale. |
+| Bash multi-line copy-paste broke verification command | Blank lines between continuations made bash treat `apptainer exec` as a complete command with no arguments; subsequent lines ran on the host and triggered an unrelated host-side `~/.local` vLLM traceback | Paste verification commands as a single line. Same trap previously documented in the AIME25 entry — recurring when copy-pasting from rendered docs that insert blank lines between code-block lines. |
+
+#### Verified runtime environment
+
+Inside `nemotron_vllm.sif` with `PYTHONPATH=$SCRATCH/lora_pip:$PYTHONPATH`:
+
+- torch 2.10.0+cu128 (container)
+- transformers 5.6.2 (container)
+- peft 0.19.1 (scratch)
+- accelerate 1.13.0 (scratch)
+
+#### Open as of end of day
+
+- **Job 6412058 in queue (PD, Priority).** Awaiting a free H200 on the gpu partition. Walltime budget is 4 h. Pass criteria are the seven verification stages enumerated in [docs/lora_strategy.md](docs/lora_strategy.md) §4. Once it runs, capture the Stage 3 `print_trainable_parameters()` output (sanity-checks PEFT's `all-linear` discovery on the hybrid arch), Stage 5 latencies, and Stage 6 score — quality of the score is secondary, the artifact existing is the milestone.
+- **Spot-checks not yet done.** Need to eyeball a sample from `data/lora_traces.jsonl` (e.g. `head -1 data/lora_traces.jsonl | python3 -m json.tool`) before the job lands a GPU, just to confirm no obvious format mistakes survived the pipeline.
+- **Data filter `--min-pass-rate` left at 0.0.** Most R1 traces have `pass_rate_72b_tir == "n/a"` (unevaluated by the 72B-TIR system); raising the threshold would drop the pool aggressively. Revisit after the first real training run if quality looks limited by data noise rather than data scale.
