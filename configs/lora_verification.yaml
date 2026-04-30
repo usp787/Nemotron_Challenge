@@ -16,7 +16,16 @@
 model:
   name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
   dtype: bfloat16
-  trust_remote_code: true
+  # Use transformers' built-in NemotronHForCausalLM rather than the
+  # remote modeling_nemotron_h.py — the remote file does an unconditional
+  # `from mamba_ssm.ops.triton.layernorm_gated import rmsnorm_fn`, and
+  # mamba-ssm is not present in the vLLM container. The built-in class
+  # in transformers >= 4.50 has its own Mamba kernels with a fallback
+  # path that does not depend on the external mamba-ssm package.
+  # If transformers can't resolve the architecture without remote code,
+  # flip back to true and switch to Option A (install mamba-ssm /
+  # causal-conv1d into $SCRATCH/lora_pip) or Option C (NeMo container).
+  trust_remote_code: false
 
 lora:
   r: 16
