@@ -24,12 +24,11 @@
 #        python3 scripts/prepare_reasoning_traces.py --num 200    # login node
 #   2. data/aime25.jsonl exists (verification eval set)
 #        python3 scripts/prepare_aime25.py                        # login node
-#   3. NeMo container exists at $SCRATCH/containers/nemo.sif
-#        See docs/lora_strategy.md, "Container setup" — pull from a CPU
-#        allocation on the short partition (login node /tmp is too small),
-#        identical to how the vLLM container was pulled.
-#   4. vLLM container exists at $SCRATCH/containers/nemotron_vllm.sif
+#   3. vLLM container exists at $SCRATCH/containers/nemotron_vllm.sif
 #        Already in place from the smoke-test bring-up.
+#   4. peft (and accelerate) installed under $SCRATCH/lora_pip
+#        See docs/lora_strategy.md, "Setup" — one-time pip install
+#        --target into $SCRATCH so we don't need a second container.
 
 set -euo pipefail
 
@@ -40,8 +39,8 @@ echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<unset>}"
 nvidia-smi
 
 PROJECT_DIR=$HOME/Nemotron_Challenge
-NEMO_CONTAINER=$SCRATCH/containers/nemo.sif
 VLLM_CONTAINER=$SCRATCH/containers/nemotron_vllm.sif
+LORA_PIP_DIR=$SCRATCH/lora_pip
 
 ADAPTER_DIR=outputs/lora_adapter_${SLURM_JOB_ID}
 EVAL_OUTPUT=outputs/lora_eval_${SLURM_JOB_ID}.jsonl
@@ -51,8 +50,9 @@ export HF_HOME=$SCRATCH/huggingface
 export TRANSFORMERS_CACHE=$SCRATCH/huggingface
 export HF_HUB_CACHE=$SCRATCH/huggingface/hub
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-# Same rationale as smoke_test.slurm: ignore ~/.local user-site so each
-# container uses its own bundled Python packages.
+# Same rationale as smoke_test.slurm: ignore ~/.local user-site so the
+# container uses its own bundled Python packages, except for the explicit
+# scratch-resident peft/accelerate install we add via PYTHONPATH below.
 export PYTHONNOUSERSITE=1
 
 # Adapter path is referenced by configs/eval_kaggle.yaml; the eval config
@@ -72,12 +72,12 @@ test -f $PROJECT_DIR/data/aime25.jsonl || {
     echo "FAIL: data/aime25.jsonl missing — run prepare_aime25.py on the login node first."
     exit 1
 }
-test -f $NEMO_CONTAINER || {
-    echo "FAIL: NeMo container missing at $NEMO_CONTAINER — see docs/lora_strategy.md"
-    exit 1
-}
 test -f $VLLM_CONTAINER || {
     echo "FAIL: vLLM container missing at $VLLM_CONTAINER"
+    exit 1
+}
+test -d $LORA_PIP_DIR/peft || {
+    echo "FAIL: peft not installed at $LORA_PIP_DIR — see docs/lora_strategy.md, 'Setup'"
     exit 1
 }
 wc -l $PROJECT_DIR/data/lora_traces.jsonl $PROJECT_DIR/data/aime25.jsonl
@@ -85,22 +85,21 @@ wc -l $PROJECT_DIR/data/lora_traces.jsonl $PROJECT_DIR/data/aime25.jsonl
 echo ""
 echo "=== Stage 2: Container GPU passthrough ==="
 apptainer exec --nv $VLLM_CONTAINER nvidia-smi >/dev/null && echo "vLLM container: GPU OK"
-apptainer exec --nv $NEMO_CONTAINER nvidia-smi >/dev/null && echo "NeMo container: GPU OK"
 
 echo ""
-echo "=== Stage 3: Train LoRA adapter (NeMo container) ==="
-# Override adapter_dir so each job writes to its own directory. The
-# train_lora.py script honours configs/lora_verification.yaml's
-# output.adapter_dir, but we want job-scoped output, so we materialise
-# a per-job dir afterwards via a symlink (cleanest cross-platform path).
+echo "=== Stage 3: Train LoRA adapter (vLLM container + scratch peft) ==="
+# Inject the scratch-resident peft/accelerate via PYTHONPATH so the vLLM
+# container picks them up without modifying the image. The container's
+# own torch + transformers are reused.
 apptainer exec --nv \
   --bind $PROJECT_DIR:/workspace \
   --bind $SCRATCH:$SCRATCH \
-  $NEMO_CONTAINER \
+  $VLLM_CONTAINER \
   bash -lc "
     cd /workspace
+    export PYTHONPATH=$LORA_PIP_DIR:\$PYTHONPATH
     python3 -c 'import torch; print(\"torch\", torch.__version__, \"cuda?\", torch.cuda.is_available())'
-    python3 -c 'import transformers, peft; print(\"transformers\", transformers.__version__, \"peft\", peft.__version__)'
+    python3 -c 'import transformers, peft, accelerate; print(\"transformers\", transformers.__version__, \"peft\", peft.__version__, \"accelerate\", accelerate.__version__)'
     python3 scripts/train_lora.py --config configs/lora_verification.yaml
   "
 

@@ -89,33 +89,54 @@ Important consequence: **whatever `enable_thinking` default Kaggle's eval uses, 
 
 These are sized for ~200 samples × 1 epoch ≈ 12 optimisation steps. The job exists to verify the artifact, not to win the leaderboard.
 
-## 3. Container setup (one-time)
+## 3. Setup (one-time)
 
-Two containers are needed; the vLLM one is already pulled.
+We use the existing vLLM container for both training and eval. The only thing missing for training is `peft` (and `accelerate`); we install those into a `$SCRATCH`-resident path and `PYTHONPATH`-inject them. This sidesteps a multi-hour container pull and saves ~30 GB of `$SCRATCH` versus pulling a separate NeMo image.
 
-### NeMo container (training)
-
-Pull from a CPU allocation on the `short` partition (login-node `/tmp` is too small for `mksquashfs`, same trap as the vLLM pull):
-
-```bash
-salloc --partition=short --cpus-per-task=8 --mem=32G --time=02:00:00
-mkdir -p $SCRATCH/containers && cd $SCRATCH/containers
-apptainer pull nemo.sif docker://nvcr.io/nvidia/nemo:25.07
-```
-
-Verify GPU passthrough and that `peft` is available:
-
-```bash
-apptainer exec --nv $SCRATCH/containers/nemo.sif bash -lc "
-python3 -c 'import torch, transformers, peft; print(torch.__version__, transformers.__version__, peft.__version__)'
-"
-```
-
-If `peft` is not bundled in the chosen NeMo tag, fall back to the PyTorch container `nvcr.io/nvidia/pytorch:25.07-py3` and `pip install peft accelerate transformers` into a venv inside the container.
-
-### vLLM container (eval) — already in place
+### vLLM container — already in place
 
 `$SCRATCH/containers/nemotron_vllm.sif` (`vllm/vllm-openai:v0.12.0`) was pulled during the smoke-test bring-up. No changes needed.
+
+### peft + accelerate into `$SCRATCH/lora_pip`
+
+Run this once, from a CPU allocation on the `short` partition. `salloc` on Explorer does NOT auto-shell into the compute node — you have to `srun --pty bash` after it:
+
+```bash
+salloc --partition=short --cpus-per-task=4 --mem=16G --time=00:30:00
+srun --jobid=$SLURM_JOB_ID --pty bash    # actually enter the compute node
+
+mkdir -p $SCRATCH/lora_pip
+apptainer exec \
+  --bind $SCRATCH:$SCRATCH \
+  $SCRATCH/containers/nemotron_vllm.sif \
+  bash -lc "pip install --target=$SCRATCH/lora_pip peft accelerate"
+```
+
+`pip install --target=...` writes packages to a directory you control rather than into the container's site-packages or `~/.local`. This bypasses `PYTHONNOUSERSITE=1` cleanly because we activate the path explicitly via `PYTHONPATH` instead of relying on user-site discovery.
+
+### Verify the install
+
+Still inside the compute-node shell:
+
+```bash
+apptainer exec \
+  --bind $SCRATCH:$SCRATCH \
+  $SCRATCH/containers/nemotron_vllm.sif \
+  bash -lc "
+    export PYTHONPATH=$SCRATCH/lora_pip:\$PYTHONPATH
+    python3 -c 'import torch, transformers, peft, accelerate;
+print(\"torch\", torch.__version__);
+print(\"transformers\", transformers.__version__);
+print(\"peft\", peft.__version__);
+print(\"accelerate\", accelerate.__version__)'
+  "
+```
+
+If all four versions print, you're done. The slurm verification script will inject the same `PYTHONPATH` automatically — no further setup needed.
+
+### Why this is safe versus the container's own packages
+
+`PYTHONPATH` is searched *between* the script directory and the container's default `site-packages`, so the scratch versions of `peft` and `accelerate` win, but `torch` and `transformers` (which we did NOT install to scratch) come from the container as before. There is no version mix between scratch and container that we depend on at runtime — `torch` and `transformers` are the ones that matter for CUDA compatibility, and we leave both untouched.
 
 ## 4. How to run the LoRA verification
 
