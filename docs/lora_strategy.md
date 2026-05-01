@@ -200,3 +200,9 @@ Job B can be submitted with `sbatch --dependency=afterok:<job_a_id> slurm/eval.s
 **Natural follow-up: training checkpoints.** A real training run on 5K+ samples at higher rank exceeds any single Slurm walltime. Adding "save full state (adapter + AdamW optimizer state + LR scheduler step) every N optim steps to `$SCRATCH/checkpoints/...`, resume from latest on startup" to `train_lora.py` makes it possible to chain multiple `train.slurm` jobs across days. Eval can also be made resume-friendly cheaply (skip prompt IDs already present in the output JSONL).
 
 These three changes — split, training checkpoints, eval resume — are the right next infrastructure pass after the verification milestone passes.
+
+sacct -j 6445308 --format=JobID,State,Elapsed,ExitCode
+Job ID(2026/4/30):6445308
+tail -n 50 logs/lora_verification_6445308.out
+
+tail -n 50 logs/lora_verification_6445308.err
