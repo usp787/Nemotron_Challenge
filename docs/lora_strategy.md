@@ -91,7 +91,15 @@ These are sized for ~200 samples × 1 epoch ≈ 12 optimisation steps. The job e
 
 ## 3. Setup (one-time)
 
-We use the existing vLLM container for both training and eval. The only thing missing for training is `peft` (and `accelerate`); we install those into a `$SCRATCH`-resident path and `PYTHONPATH`-inject them. This sidesteps a multi-hour container pull and saves ~30 GB of `$SCRATCH` versus pulling a separate NeMo image.
+We use the existing vLLM container for both training and eval. The only required missing pieces for verification are `peft` and `accelerate`; we install those into a `$SCRATCH`-resident path and `PYTHONPATH`-inject them. This sidesteps a multi-hour container pull and saves ~30 GB of `$SCRATCH` versus pulling a separate NeMo image.
+
+Do not switch to a NeMo container just because `mamba-ssm` fails to import. A failure like:
+
+```text
+selective_scan_cuda...so: undefined symbol: _ZN3c104cuda29c10_cuda_check_implementation...
+```
+
+means the scratch-installed `mamba-ssm` extension was compiled against a different PyTorch C++ ABI than the vLLM container's torch. For the 200-sample verification run, remove the broken scratch extension and let transformers use the slower pure-PyTorch Mamba path. Rebuild the extension only for real training.
 
 ### vLLM container — already in place
 
@@ -134,6 +142,33 @@ print(\"accelerate\", accelerate.__version__)'
 
 If all four versions print, you're done. The slurm verification script will inject the same `PYTHONPATH` automatically — no further setup needed.
 
+### If a previous run installed broken `mamba-ssm`
+
+Verification job `6459431` hit a scratch-extension ABI mismatch while importing `selective_scan_cuda`. The fastest unblock is to remove only the optional compiled Mamba packages from `$SCRATCH/lora_pip`:
+
+```bash
+rm -rf $SCRATCH/lora_pip/mamba_ssm \
+       $SCRATCH/lora_pip/mamba_ssm-*.dist-info \
+       $SCRATCH/lora_pip/selective_scan_cuda*.so \
+       $SCRATCH/lora_pip/causal_conv1d* \
+       $SCRATCH/lora_pip/causal_conv1d-*.dist-info
+```
+
+The verification Slurm job does this by default because the run is only about proving the adapter pipeline. For a larger training run, rebuild the kernels inside the same vLLM container so they link against that container's torch:
+
+```bash
+apptainer exec --nv --bind $SCRATCH:$SCRATCH $SCRATCH/containers/nemotron_vllm.sif \
+  bash -lc "
+    rm -rf $SCRATCH/lora_pip/mamba_ssm* $SCRATCH/lora_pip/causal_conv1d* \
+           $SCRATCH/lora_pip/selective_scan_cuda*.so
+    MAMBA_FORCE_BUILD=TRUE CAUSAL_CONV1D_FORCE_BUILD=TRUE \
+    pip install --target=$SCRATCH/lora_pip --no-build-isolation --no-cache-dir \
+      causal-conv1d mamba-ssm
+  "
+```
+
+`--no-build-isolation` matters: it keeps the build tied to the vLLM container's torch instead of compiling against a transient build-environment torch.
+
 ### Why this is safe versus the container's own packages
 
 `PYTHONPATH` is searched *between* the script directory and the container's default `site-packages`, so the scratch versions of `peft` and `accelerate` win, but `torch` and `transformers` (which we did NOT install to scratch) come from the container as before. There is no version mix between scratch and container that we depend on at runtime — `torch` and `transformers` are the ones that matter for CUDA compatibility, and we leave both untouched.
@@ -155,8 +190,8 @@ The slurm script runs Stages 0-7. Pass criteria:
 
 | Stage | Check |
 |---|---|
-| 1. Prerequisites | both JSONLs present, both containers present |
-| 2. Container GPU | `nvidia-smi` works inside both |
+| 1. Prerequisites | both JSONLs present, vLLM container present |
+| 2. Container GPU | `nvidia-smi` works inside the vLLM container |
 | 3. Train | `train_lora.py` exits 0; adapter dir created |
 | 4. Adapter shape | `adapter_config.json` exists, content looks sane |
 | 5. Eval | `outputs/lora_eval_<JOB_ID>.jsonl` written, no run-wide error |
@@ -181,12 +216,13 @@ These are explicit follow-ups, not gaps in the verification.
 3. A/B `enable_thinking=True` vs `False` at eval time using the same adapter.
 4. Add a held-out dev split (e.g. MATH-500 or GPQA-Diamond) so improvement signals are not dominated by AIME25's 30-problem variance.
 5. Consider on-policy distillation from a stronger teacher (DeepSeek-R1, QwQ-32B) for the next iteration — research shows ~7-10× faster convergence than RL with comparable quality at this rank range.
+6. Rebuild `mamba-ssm` + `causal-conv1d` against the container's torch before kicking off the 5K-sample run — see §3 "Mamba-2 SSM extension". The pure-PyTorch fallback used during verification will dominate wall time at scale.
 
 ## 7. Future direction: split into two sequential cluster jobs
 
 The current `slurm/lora_verification.slurm` is monolithic — train + eval + score + package in one allocation. That's right for the verification milestone but starts to creak once we move to real training. Future shape:
 
-- **Job A — `train.slurm`** allocates one H200, runs the NeMo container, trains, saves the adapter to a job-scoped directory (or a `outputs/lora_adapter` symlink). Walltime ~1-2h.
+- **Job A — `train.slurm`** allocates one H200, runs the vLLM container with the scratch HF/PEFT deps, trains, saves the adapter to a job-scoped directory (or a `outputs/lora_adapter` symlink). Walltime ~1-2h.
 - **Job B — `eval.slurm`** allocates one H200, runs the vLLM container, loads the adapter Job A produced, runs `baseline_generate.py --config configs/eval_kaggle.yaml`, scores, packages. Walltime ~1h.
 
 Job B can be submitted with `sbatch --dependency=afterok:<job_a_id> slurm/eval.slurm` so it queues immediately and starts the moment training finishes successfully.
@@ -201,8 +237,8 @@ Job B can be submitted with `sbatch --dependency=afterok:<job_a_id> slurm/eval.s
 
 These three changes — split, training checkpoints, eval resume — are the right next infrastructure pass after the verification milestone passes.
 
-sacct -j 6445308 --format=JobID,State,Elapsed,ExitCode
-Job ID(2026/4/30):6445308
-tail -n 50 logs/lora_verification_6445308.out
+sacct -j 6459431 --format=JobID,State,Elapsed,ExitCode
+Job ID(2026/5/1):6459431
+tail -n 50 logs/lora_verification_6459431.out
 
-tail -n 50 logs/lora_verification_6445308.err
+tail -n 50 logs/lora_verification_6459431.err

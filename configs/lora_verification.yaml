@@ -17,9 +17,11 @@ model:
   name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
   dtype: bfloat16
   # Container's transformers (4.57.3) has no built-in NemotronHForCausalLM,
-  # so we must take the remote-code path. The remote modeling file imports
-  # mamba-ssm unconditionally — see docs/lora_strategy.md for the matching
-  # $SCRATCH/lora_pip install of mamba-ssm and causal-conv1d.
+  # so we must take the remote-code path. The remote modeling file probes
+  # mamba-ssm via transformers' is_mamba_2_ssm_available(); for the
+  # verification milestone we deliberately leave mamba-ssm out of
+  # $SCRATCH/lora_pip and use the slow pure-PyTorch Mamba path. The slurm
+  # script enforces this. See docs/lora_strategy.md §3 "Mamba-2 SSM extension".
   trust_remote_code: true
 
 lora:
