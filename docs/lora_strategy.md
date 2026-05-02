@@ -91,7 +91,7 @@ These are sized for ~200 samples × 1 epoch ≈ 12 optimisation steps. The job e
 
 ## 3. Setup (one-time)
 
-We use the existing vLLM container for both training and eval. The only required missing pieces for verification are `peft` and `accelerate`; we install those into a `$SCRATCH`-resident path and `PYTHONPATH`-inject them. This sidesteps a multi-hour container pull and saves ~30 GB of `$SCRATCH` versus pulling a separate NeMo image.
+We use the existing vLLM container for both training and eval. Required scratch-resident packages: `peft`, `accelerate`, `mamba-ssm`, `causal-conv1d`. We install all four into a `$SCRATCH`-resident path and `PYTHONPATH`-inject them. This sidesteps a multi-hour container pull and saves ~30 GB of `$SCRATCH` versus pulling a separate NeMo image.
 
 Do not switch to a NeMo container just because `mamba-ssm` fails to import. A failure like:
 
@@ -99,7 +99,7 @@ Do not switch to a NeMo container just because `mamba-ssm` fails to import. A fa
 selective_scan_cuda...so: undefined symbol: _ZN3c104cuda29c10_cuda_check_implementation...
 ```
 
-means the scratch-installed `mamba-ssm` extension was compiled against a different PyTorch C++ ABI than the vLLM container's torch. For the 200-sample verification run, remove the broken scratch extension and let transformers use the slower pure-PyTorch Mamba path. Rebuild the extension only for real training.
+means the scratch-installed `mamba-ssm` extension was compiled against a different PyTorch C++ ABI than the vLLM container's torch. The fix is to rebuild it inside the container — see "Mamba-2 SSM extension" below. **There is no PyTorch fallback for this model.** NVIDIA's `modeling_nemotron_h.py` (loaded via `trust_remote_code=True`) does an unconditional `from mamba_ssm.ops.triton.layernorm_gated import rmsnorm_fn` at module load and re-raises `ImportError` if it fails. Earlier guidance in this section claimed a "pure-PyTorch Mamba path" was usable for verification; that is true for transformers' built-in `MambaModel`, but NOT for the Nemotron-H custom code path.
 
 ### vLLM container — already in place
 
@@ -142,32 +142,43 @@ print(\"accelerate\", accelerate.__version__)'
 
 If all four versions print, you're done. The slurm verification script will inject the same `PYTHONPATH` automatically — no further setup needed.
 
-### If a previous run installed broken `mamba-ssm`
+### Mamba-2 SSM extension (required for verification too)
 
-Verification job `6459431` hit a scratch-extension ABI mismatch while importing `selective_scan_cuda`. The fastest unblock is to remove only the optional compiled Mamba packages from `$SCRATCH/lora_pip`:
+`mamba-ssm` and `causal-conv1d` must be present in `$SCRATCH/lora_pip` and built against the vLLM container's torch. They are not optional — the Nemotron-H custom modeling code imports them unconditionally (see §3 intro). The slurm verification script now hard-fails in Stage 1 if either directory is missing.
 
-```bash
-rm -rf $SCRATCH/lora_pip/mamba_ssm \
-       $SCRATCH/lora_pip/mamba_ssm-*.dist-info \
-       $SCRATCH/lora_pip/selective_scan_cuda*.so \
-       $SCRATCH/lora_pip/causal_conv1d* \
-       $SCRATCH/lora_pip/causal_conv1d-*.dist-info
-```
-
-The verification Slurm job does this by default because the run is only about proving the adapter pipeline. For a larger training run, rebuild the kernels inside the same vLLM container so they link against that container's torch:
+Build (or rebuild after an ABI mismatch) inside the same vLLM container so the kernels link against that container's torch:
 
 ```bash
-apptainer exec --nv --bind $SCRATCH:$SCRATCH $SCRATCH/containers/nemotron_vllm.sif \
+apptainer exec --bind $SCRATCH:$SCRATCH $SCRATCH/containers/nemotron_vllm.sif \
   bash -lc "
     rm -rf $SCRATCH/lora_pip/mamba_ssm* $SCRATCH/lora_pip/causal_conv1d* \
            $SCRATCH/lora_pip/selective_scan_cuda*.so
     MAMBA_FORCE_BUILD=TRUE CAUSAL_CONV1D_FORCE_BUILD=TRUE \
-    pip install --target=$SCRATCH/lora_pip --no-build-isolation --no-cache-dir \
-      causal-conv1d mamba-ssm
+    pip install --target=$SCRATCH/lora_pip --no-build-isolation --no-deps --no-cache-dir \
+      causal-conv1d==1.6.1 mamba-ssm==2.3.1
   "
 ```
 
-`--no-build-isolation` matters: it keeps the build tied to the vLLM container's torch instead of compiling against a transient build-environment torch.
+Notes:
+
+- `--no-build-isolation` keeps the build tied to the vLLM container's torch instead of compiling against a transient build-environment torch — this is what prevents the `_ZN3c104cuda...` ABI crash at import time.
+- `--no-deps` prevents pip from upgrading the container's torch.
+- The pinned versions (`causal-conv1d==1.6.1`, `mamba-ssm==2.3.1`) are the pair previously verified to import cleanly against the container's `torch 2.10.0+cu128` (see README, 2026-04-29).
+- No `--nv` flag is needed — the build invokes `nvcc` for compilation but does not launch any CUDA kernels, so it does not need a GPU. Run on a CPU compute node with ≥ 32 GB RAM (login-node `/tmp` is too small and triggers OOM during the link step).
+- Build time is 15–30 min on 8 CPUs.
+
+After the rebuild, verify the import:
+
+```bash
+apptainer exec --bind $SCRATCH:$SCRATCH $SCRATCH/containers/nemotron_vllm.sif \
+  bash -lc "
+    export PYTHONPATH=$SCRATCH/lora_pip:\$PYTHONPATH
+    export PYTHONNOUSERSITE=1
+    python3 -c 'import torch, mamba_ssm, causal_conv1d; print(torch.__version__, mamba_ssm.__version__, causal_conv1d.__version__)'
+  "
+```
+
+Expected output: `2.10.0+cu128 2.3.1 1.6.1`. Any other torch version means a stale `torch/` is sitting in `$SCRATCH/lora_pip` and shadowing the container's torch via `PYTHONPATH` — remove it (`rm -rf $SCRATCH/lora_pip/torch $SCRATCH/lora_pip/torch-*.dist-info $SCRATCH/lora_pip/nvidia*`) before rebuilding mamba-ssm, or the kernels will be built against the wrong ABI.
 
 ### Why this is safe versus the container's own packages
 
@@ -216,7 +227,6 @@ These are explicit follow-ups, not gaps in the verification.
 3. A/B `enable_thinking=True` vs `False` at eval time using the same adapter.
 4. Add a held-out dev split (e.g. MATH-500 or GPQA-Diamond) so improvement signals are not dominated by AIME25's 30-problem variance.
 5. Consider on-policy distillation from a stronger teacher (DeepSeek-R1, QwQ-32B) for the next iteration — research shows ~7-10× faster convergence than RL with comparable quality at this rank range.
-6. Rebuild `mamba-ssm` + `causal-conv1d` against the container's torch before kicking off the 5K-sample run — see §3 "Mamba-2 SSM extension". The pure-PyTorch fallback used during verification will dominate wall time at scale.
 
 ## 7. Future direction: split into two sequential cluster jobs
 
@@ -237,8 +247,10 @@ Job B can be submitted with `sbatch --dependency=afterok:<job_a_id> slurm/eval.s
 
 These three changes — split, training checkpoints, eval resume — are the right next infrastructure pass after the verification milestone passes.
 
-sacct -j 6459431 --format=JobID,State,Elapsed,ExitCode
+sacct -j 6484958 --format=JobID,State,Elapsed,ExitCode
 Job ID(2026/5/1):6459431
-tail -n 50 logs/lora_verification_6459431.out
+tail -n 50 logs/lora_verification_6484958.out
 
-tail -n 50 logs/lora_verification_6459431.err
+tail -n 50 logs/lora_verification_6484958.err
+
+Job ID new(2026/5/1):6484958

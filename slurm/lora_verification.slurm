@@ -82,18 +82,18 @@ test -d $LORA_PIP_DIR/peft || {
 }
 wc -l $PROJECT_DIR/data/lora_traces.jsonl $PROJECT_DIR/data/aime25.jsonl
 
-# Drop any pre-existing mamba-ssm / causal-conv1d artifacts from
-# $SCRATCH/lora_pip. Verification deliberately runs without them so
-# transformers falls back to the pure-PyTorch Mamba path; a stale wheel
-# whose selective_scan_cuda.so was built against a different torch
-# crashes model load with `undefined symbol: _ZN3c104cuda...`. See
-# docs/lora_strategy.md §3 "Mamba-2 SSM extension".
-echo "Cleaning any prior mamba-ssm/causal-conv1d artifacts from $LORA_PIP_DIR (verification uses slow Mamba path):"
-rm -rf $LORA_PIP_DIR/mamba_ssm \
-       $LORA_PIP_DIR/mamba_ssm-*.dist-info \
-       $LORA_PIP_DIR/selective_scan_cuda*.so \
-       $LORA_PIP_DIR/causal_conv1d* \
-       $LORA_PIP_DIR/causal_conv1d-*.dist-info
+# mamba-ssm + causal-conv1d must be present in $LORA_PIP_DIR and ABI-matched
+# to the container's torch. Nemotron-H's trust_remote_code modeling code does
+# an unconditional mamba_ssm import — there is no PyTorch fallback. See
+# docs/lora_strategy.md §3 "Mamba-2 SSM extension" for the rebuild recipe.
+test -d $LORA_PIP_DIR/mamba_ssm || {
+    echo "FAIL: mamba_ssm missing from $LORA_PIP_DIR — rebuild per docs/lora_strategy.md §3."
+    exit 1
+}
+test -d $LORA_PIP_DIR/causal_conv1d || {
+    echo "FAIL: causal_conv1d missing from $LORA_PIP_DIR — rebuild per docs/lora_strategy.md §3."
+    exit 1
+}
 
 echo ""
 echo "=== Stage 2: Container GPU passthrough ==="
@@ -113,9 +113,10 @@ apptainer exec --nv \
     export PYTHONPATH=$LORA_PIP_DIR:\$PYTHONPATH
     python3 -c 'import torch; print(\"torch\", torch.__version__, \"cuda?\", torch.cuda.is_available())'
     python3 -c 'import transformers, peft, accelerate; print(\"transformers\", transformers.__version__, \"peft\", peft.__version__, \"accelerate\", accelerate.__version__)'
-    # Health check for mamba-ssm: absent => slow path (expected for verification);
-    # present => import it now so an ABI mismatch fails fast before the model download.
-    python3 -c 'import importlib.util as u; spec=u.find_spec(\"mamba_ssm\"); print(\"mamba_ssm:\", \"absent (slow PyTorch Mamba path)\" if spec is None else __import__(\"mamba_ssm\").__version__)'
+    # mamba-ssm and causal-conv1d are REQUIRED by Nemotron-H's trust_remote_code
+    # path. Import them here so an ABI mismatch fails fast (before the model
+    # download), instead of crashing 60s into model load.
+    python3 -c 'import mamba_ssm, causal_conv1d; print(\"mamba_ssm\", mamba_ssm.__version__, \"causal_conv1d\", causal_conv1d.__version__)'
     python3 scripts/train_lora.py --config configs/lora_verification.yaml
   "
 
