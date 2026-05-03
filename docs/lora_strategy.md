@@ -272,8 +272,8 @@ These three changes — split, training checkpoints, eval resume — are the rig
 
 sacct -j 6484958 --format=JobID,State,Elapsed,ExitCode
 Job ID(2026/5/1):6459431
-tail -n 50 logs/lora_verification_6516064.out
+tail -n 50 logs/lora_verification_6518135.out
 
-tail -n 50 logs/lora_verification_6516064.err
+tail -n 50 logs/lora_verification_6518135.err
 
 Job ID new(2026/5/1):6484958

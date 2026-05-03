@@ -17,6 +17,10 @@ Why these defaults:
     ``get_expert_mapping`` method needed to apply LoRA to MoE experts.
     Since Kaggle scores via vLLM, the adapter must avoid expert layers
     entirely. See docs/lora_strategy.md §3 "vLLM MoE LoRA constraint".
+  - 2026-05-03 update: the verification YAML now restores
+    ``target_modules="all-linear"`` and evaluates with a newer vLLM image.
+    The older attention-only note above describes the v0.12.0 workaround
+    attempt that job 6518135 proved insufficient.
   - ``gradient_checkpointing=True``: 30B BF16 weights = ~60 GB; on a
     single H200 (143 GB), checkpointing keeps activation memory in
     range at ``max_seq_len=4096, batch=1``.

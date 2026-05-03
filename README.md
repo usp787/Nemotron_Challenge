@@ -398,10 +398,20 @@ Pipeline files:
 | Training config | [configs/lora_verification.yaml](configs/lora_verification.yaml) |
 | Trainer | [scripts/train_lora.py](scripts/train_lora.py) |
 | Eval at Kaggle params | [configs/eval_kaggle.yaml](configs/eval_kaggle.yaml) + [scripts/baseline_generate.py](scripts/baseline_generate.py) (now LoRA-aware) |
+| New vLLM eval image pull | [slurm/pull_vllm_lora_eval.slurm](slurm/pull_vllm_lora_eval.slurm) |
+| One-prompt LoRA load probe | [configs/eval_lora_probe.yaml](configs/eval_lora_probe.yaml) + [slurm/lora_vllm_probe.slurm](slurm/lora_vllm_probe.slurm) |
 | Submission packager | [scripts/package_submission.py](scripts/package_submission.py) |
 | Slurm orchestration | [slurm/lora_verification.slurm](slurm/lora_verification.slurm) |
 
-Prerequisites and exact command sequence in [docs/lora_strategy.md §3-4](docs/lora_strategy.md). One-time setup needed: pull the NeMo container to `$SCRATCH/containers/nemo.sif`.
+Prerequisites and exact command sequence in [docs/lora_strategy.md §3-4](docs/lora_strategy.md). The current verification path uses two vLLM containers: the known-good v0.12.0 image for HF/PEFT training, and a newer CUDA-12.9 vLLM image for LoRA-enabled eval because v0.12.0 cannot initialize Nemotron-H MoE LoRA. Pull and probe the newer eval image before running the full verification:
+
+```bash
+sbatch slurm/pull_vllm_lora_eval.slurm
+sbatch slurm/lora_vllm_probe.slurm
+sbatch slurm/lora_verification.slurm
+```
+
+The pull job does not need a GPU. The one-prompt probe and full LoRA verification both request H200 so failures are not confounded by ambiguous A100 memory size on Explorer.
 
 ---
 

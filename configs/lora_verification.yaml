@@ -1,7 +1,7 @@
 # LoRA verification training config.
 #
 # Goal: prove the end-to-end pipeline (data -> train -> save adapter -> vLLM
-# load -> eval at Kaggle params) runs cleanly on a single H200. NOT a tuning
+# load -> eval at Kaggle params) runs cleanly on a single GPU. NOT a tuning
 # config. Numbers are sized for a small dataset (~200 samples) and one epoch
 # so the verification slurm job finishes inside ~2h.
 #
@@ -9,14 +9,12 @@
 #   - rank <= 32 (we use 16 to stay clear of the cap)
 #   - sequence length aligned to the 8192 eval context (we train at 4096 to
 #     leave activation/KV headroom on a single H200 during backward)
-#   - target_modules MUST exclude MoE expert layers. vLLM 0.12.0's
-#     NemotronHForCausalLM does not implement get_expert_mapping, so any
-#     adapter containing LoRAs on MoE expert weights fails to load with
-#     "AttributeError: To support LoRA for MoE model, 'get_expert_mapping'
-#     must be implemented". Kaggle scores via vLLM, so this is a submission
-#     constraint, not just a local-eval one. Earlier "all-linear" guidance
-#     was inverted by this finding (job 6516064, 2026-05-02) — see
-#     docs/lora_strategy.md §3 "vLLM MoE LoRA constraint".
+#   - target_modules is restored to "all-linear" so the verification adapter
+#     covers attention, Mamba projections, and MoE expert projections. The old
+#     vLLM 0.12.0 eval image cannot load this adapter because its Nemotron-H
+#     class lacks get_expert_mapping; slurm/lora_verification.slurm now trains
+#     with the known-good v0.12 container but evaluates with a newer LoRA eval
+#     image after slurm/lora_vllm_probe.slurm passes.
 
 model:
   name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
@@ -31,25 +29,17 @@ lora:
   r: 16
   alpha: 32
   dropout: 0.0
-  # Attention-only target list. Substring-matched against module names, so
-  # this picks up q/k/v/o across all attention blocks and ignores MoE
-  # expert layers (mixer.experts.<idx>.down_proj/up_proj) and Mamba
-  # projections. Verification milestone: minimum-viable LoRA that vLLM
-  # will load. Broadening to Mamba/router layers is a follow-up once
-  # verification is green and we've confirmed which non-expert modules
-  # vLLM's NemotronHForCausalLM supports LoRA on.
-  target_modules:
-    - q_proj
-    - k_proj
-    - v_proj
-    - o_proj
+  # PEFT's special value for every linear layer. This recovers the original
+  # verification goal: attention + Mamba projections + MoE expert projections.
+  # Evaluation must use the newer vLLM LoRA eval image, not v0.12.0.
+  target_modules: all-linear
   bias: none
   task_type: CAUSAL_LM
 
 data:
   input_path: data/lora_traces.jsonl
   max_seq_len: 4096
-  # Loss is computed on the assistant turn only — user prompt tokens get
+  # Loss is computed on the assistant turn only; user prompt tokens get
   # label=-100. Set to false to train on full sequence (less faithful to
   # the inference-time distribution but slightly simpler).
   mask_user_loss: true

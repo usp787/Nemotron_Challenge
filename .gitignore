@@ -5,6 +5,7 @@ outputs/
 *.err
 *.jsonl
 !data/sample_prompts_5.jsonl
+!data/lora_probe_prompt.jsonl
 
 # LoRA training artifacts
 outputs/lora_adapter*/

@@ -11,9 +11,9 @@
 # LoRA verification pipeline.
 #
 # Goal: prove the full path runs end-to-end on a single H200:
-#   data prep (already done on login node) -> train LoRA in NeMo container
-#   -> verify adapter shape -> evaluate at Kaggle eval params in vLLM
-#   container -> score with evaluate.py -> package submission.zip.
+#   data prep (already done on login node) -> train LoRA in the known-good
+#   vLLM v0.12 container -> verify adapter shape -> evaluate at Kaggle eval
+#   params in the newer LoRA eval vLLM container -> score -> package zip.
 #
 # This is a *verification* run, not a tuning run: tiny dataset, one epoch.
 # Pass criterion is "every stage produces the expected artifact". Quality
@@ -24,9 +24,13 @@
 #        python3 scripts/prepare_reasoning_traces.py --num 200    # login node
 #   2. data/aime25.jsonl exists (verification eval set)
 #        python3 scripts/prepare_aime25.py                        # login node
-#   3. vLLM container exists at $SCRATCH/containers/nemotron_vllm.sif
+#   3. Training vLLM container exists at $SCRATCH/containers/nemotron_vllm.sif
 #        Already in place from the smoke-test bring-up.
-#   4. peft (and accelerate) installed under $SCRATCH/lora_pip
+#   4. LoRA eval vLLM container exists at
+#        $SCRATCH/containers/nemotron_vllm_v0200_cu129.sif
+#        sbatch slurm/pull_vllm_lora_eval.slurm
+#        sbatch slurm/lora_vllm_probe.slurm
+#   5. peft (and accelerate) installed under $SCRATCH/lora_pip
 #        See docs/lora_strategy.md, "Setup" — one-time pip install
 #        --target into $SCRATCH so we don't need a second container.
 
@@ -39,7 +43,8 @@ echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<unset>}"
 nvidia-smi
 
 PROJECT_DIR=$HOME/Nemotron_Challenge
-VLLM_CONTAINER=$SCRATCH/containers/nemotron_vllm.sif
+TRAIN_CONTAINER=$SCRATCH/containers/nemotron_vllm.sif
+EVAL_CONTAINER=${VLLM_LORA_EVAL_CONTAINER:-$SCRATCH/containers/nemotron_vllm_v0200_cu129.sif}
 LORA_PIP_DIR=$SCRATCH/lora_pip
 
 ADAPTER_DIR=outputs/lora_adapter_${SLURM_JOB_ID}
@@ -72,8 +77,14 @@ test -f $PROJECT_DIR/data/aime25.jsonl || {
     echo "FAIL: data/aime25.jsonl missing — run prepare_aime25.py on the login node first."
     exit 1
 }
-test -f $VLLM_CONTAINER || {
-    echo "FAIL: vLLM container missing at $VLLM_CONTAINER"
+test -f $TRAIN_CONTAINER || {
+    echo "FAIL: training vLLM container missing at $TRAIN_CONTAINER"
+    exit 1
+}
+test -f $EVAL_CONTAINER || {
+    echo "FAIL: newer LoRA eval vLLM container missing at $EVAL_CONTAINER"
+    echo "Run: sbatch slurm/pull_vllm_lora_eval.slurm"
+    echo "Then run: sbatch slurm/lora_vllm_probe.slurm"
     exit 1
 }
 test -d $LORA_PIP_DIR/peft || {
@@ -97,7 +108,8 @@ test -d $LORA_PIP_DIR/causal_conv1d || {
 
 echo ""
 echo "=== Stage 2: Container GPU passthrough ==="
-apptainer exec --nv $VLLM_CONTAINER nvidia-smi >/dev/null && echo "vLLM container: GPU OK"
+apptainer exec --nv $TRAIN_CONTAINER nvidia-smi >/dev/null && echo "training vLLM container: GPU OK"
+apptainer exec --nv $EVAL_CONTAINER nvidia-smi >/dev/null && echo "LoRA eval vLLM container: GPU OK"
 
 echo ""
 echo "=== Stage 3: Train LoRA adapter (vLLM container + scratch peft) ==="
@@ -107,7 +119,7 @@ echo "=== Stage 3: Train LoRA adapter (vLLM container + scratch peft) ==="
 apptainer exec --nv \
   --bind $PROJECT_DIR:/workspace \
   --bind $SCRATCH:$SCRATCH \
-  $VLLM_CONTAINER \
+  $TRAIN_CONTAINER \
   bash -lc "
     cd /workspace
     export PYTHONPATH=$LORA_PIP_DIR:\$PYTHONPATH
@@ -138,13 +150,13 @@ echo "adapter_config.json:"
 cat $PROJECT_DIR/$ADAPTER_DIR/adapter_config.json | python3 -m json.tool | head -n 40
 
 echo ""
-echo "=== Stage 5: Evaluate at Kaggle eval params (vLLM container) ==="
+echo "=== Stage 5: Evaluate at Kaggle eval params (newer LoRA eval vLLM container) ==="
 # configs/eval_kaggle.yaml points at outputs/lora_adapter; ensure that
 # path resolves to the per-job directory we just produced.
 apptainer exec --nv \
   --bind $PROJECT_DIR:/workspace \
   --bind $SCRATCH:$SCRATCH \
-  $VLLM_CONTAINER \
+  $EVAL_CONTAINER \
   bash -lc "
     cd /workspace
     python3 scripts/baseline_generate.py \
@@ -156,7 +168,7 @@ echo ""
 echo "=== Stage 6: Score ==="
 apptainer exec --nv \
   --bind $PROJECT_DIR:/workspace \
-  $VLLM_CONTAINER \
+  $EVAL_CONTAINER \
   bash -lc "
     cd /workspace
     python3 scripts/evaluate.py --predictions $EVAL_OUTPUT --score
@@ -166,7 +178,7 @@ echo ""
 echo "=== Stage 7: Package submission ==="
 apptainer exec \
   --bind $PROJECT_DIR:/workspace \
-  $VLLM_CONTAINER \
+  $TRAIN_CONTAINER \
   bash -lc "
     cd /workspace
     python3 scripts/package_submission.py \
