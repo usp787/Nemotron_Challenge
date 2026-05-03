@@ -38,7 +38,7 @@ The LoRA's job is therefore to **shift the response distribution toward concise,
 NeMo Automodel is the official NVIDIA path for LoRA on Nemotron-3 Nano, but Automodel itself is a wrapper over HF transformers + peft + accelerate. We call those libraries directly because:
 
 - The YAML schema for NeMo Automodel changes between releases; calling HF APIs directly is more durable.
-- Nemotron-3 Nano is a hybrid Mamba-2/MoE custom architecture loaded via `trust_remote_code=True`. PEFT's `target_modules="all-linear"` discovers LoRA target layers programmatically, which avoids hard-coding `q_proj`/`k_proj`/`v_proj`/`o_proj` and silently missing MoE expert / Mamba projection layers.
+- Nemotron-3 Nano is a hybrid Mamba-2/MoE custom architecture loaded via `trust_remote_code=True`. PEFT's `target_modules` is set to the attention-only list `[q_proj, k_proj, v_proj, o_proj]` — see §3 "vLLM MoE LoRA constraint" for why "all-linear" can't be used here.
 - HF PEFT writes `adapter_config.json` + `adapter_model.safetensors` in the exact shape Kaggle expects.
 
 Both NeMo Automodel and our direct path produce equivalent adapter artifacts. If NeMo lands first-class Nemotron-3 Nano LoRA recipes ([NeMo issue #14856](https://github.com/NVIDIA-NeMo/NeMo/issues/14856)) we can swap in.
@@ -79,7 +79,7 @@ Important consequence: **whatever `enable_thinking` default Kaggle's eval uses, 
 |---|---|---|
 | `r` (LoRA rank) | 16 | half the Kaggle cap of 32, leaves room to grow |
 | `alpha` | 32 | conventional `alpha = 2 × rank` |
-| `target_modules` | `"all-linear"` | robust to the hybrid arch |
+| `target_modules` | `[q_proj, k_proj, v_proj, o_proj]` | attention-only; expert/Mamba layers excluded — see §3 "vLLM MoE LoRA constraint" |
 | `dropout` | 0.0 | small dataset, no need |
 | `max_seq_len` | 4096 | half the eval context — eases activation memory on a single H200 during backward |
 | `epochs` | 1 | verification, not tuning |
@@ -100,6 +100,24 @@ selective_scan_cuda...so: undefined symbol: _ZN3c104cuda29c10_cuda_check_impleme
 ```
 
 means the scratch-installed `mamba-ssm` extension was compiled against a different PyTorch C++ ABI than the vLLM container's torch. The fix is to rebuild it inside the container — see "Mamba-2 SSM extension" below. **There is no PyTorch fallback for this model.** NVIDIA's `modeling_nemotron_h.py` (loaded via `trust_remote_code=True`) does an unconditional `from mamba_ssm.ops.triton.layernorm_gated import rmsnorm_fn` at module load and re-raises `ImportError` if it fails. Earlier guidance in this section claimed a "pure-PyTorch Mamba path" was usable for verification; that is true for transformers' built-in `MambaModel`, but NOT for the Nemotron-H custom code path.
+
+### vLLM MoE LoRA constraint
+
+vLLM 0.12.0's built-in `NemotronHForCausalLM` (the in-engine model class, not the `trust_remote_code` modeling file) does not implement `get_expert_mapping`. When vLLM tries to load a LoRA adapter that touches MoE expert weights, `process_packed_modules_mapping` raises:
+
+```text
+AttributeError: To support LoRA for MoE model, 'get_expert_mapping' must be implemented
+```
+
+Job 6516064 hit this. Training (Stage 3) succeeded with `target_modules="all-linear"` and produced an adapter where 11,868 of 12,008 LoRA tensors (≈ 98.8%) targeted `mixer.experts.<idx>.{down_proj,up_proj}`. vLLM rejected the load before the eval could run.
+
+**This is a Kaggle constraint, not just a local-eval one.** Kaggle scores via vLLM (same engine, same model). Until upstream vLLM ships `get_expert_mapping` for Nemotron-H, any adapter we submit must avoid expert layers.
+
+Practical implication for `target_modules`:
+
+- **Verification** (current): attention-only, explicit list `[q_proj, k_proj, v_proj, o_proj]`. ~48 LoRA tensors. Definitely loads.
+- **Possible follow-up:** `target_modules: all-linear` + `exclude_modules: "experts"` to add Mamba `mixer.in_proj`/`mixer.out_proj` LoRA on top of attention. Adapter would grow to ~140 tensors. Untested whether vLLM's NemotronHForCausalLM supports LoRA on Mamba mixer modules — try after verification turns green.
+- **Don't:** target Mamba/MoE via "all-linear" without excluding experts. Experts dominate the layer count and trigger the failure above.
 
 ### vLLM container — already in place
 
@@ -146,28 +164,33 @@ If all four versions print, you're done. The slurm verification script will inje
 
 `mamba-ssm` and `causal-conv1d` must be present in `$SCRATCH/lora_pip` and built against the vLLM container's torch. They are not optional — the Nemotron-H custom modeling code imports them unconditionally (see §3 intro). The slurm verification script now hard-fails in Stage 1 if either directory is missing.
 
-Build (or rebuild after an ABI mismatch) inside the same vLLM container so the kernels link against that container's torch:
+The container's bundled torch is `2.9.0+cu129` (verified 2026-05-02 with `--nv` + `PYTHONNOUSERSITE=1`). Earlier "torch 2.10.0+cu128" claims in this repo's notes referred to `~/.local`'s user-site torch, which `PYTHONNOUSERSITE=1` deliberately excludes — that ambiguity was the root cause of the original ABI crash, because the previous build picked up the user-site torch while the slurm runtime used the container torch.
+
+Build (or rebuild after an ABI mismatch) inside the same vLLM container so the kernels link against that container's torch. **`PYTHONNOUSERSITE=1` must be set during the build**, otherwise `~/.local` shadows the container's torch and you'll rebuild against the wrong ABI:
 
 ```bash
 apptainer exec --bind $SCRATCH:$SCRATCH $SCRATCH/containers/nemotron_vllm.sif \
   bash -lc "
+    export PYTHONNOUSERSITE=1
     rm -rf $SCRATCH/lora_pip/mamba_ssm* $SCRATCH/lora_pip/causal_conv1d* \
            $SCRATCH/lora_pip/selective_scan_cuda*.so
+    python3 -c 'import torch; print(\"build will link against torch\", torch.__version__)'
     MAMBA_FORCE_BUILD=TRUE CAUSAL_CONV1D_FORCE_BUILD=TRUE \
     pip install --target=$SCRATCH/lora_pip --no-build-isolation --no-deps --no-cache-dir \
-      causal-conv1d==1.6.1 mamba-ssm==2.3.1
+      causal-conv1d mamba-ssm
   "
 ```
 
 Notes:
 
-- `--no-build-isolation` keeps the build tied to the vLLM container's torch instead of compiling against a transient build-environment torch — this is what prevents the `_ZN3c104cuda...` ABI crash at import time.
+- `PYTHONNOUSERSITE=1` matches the slurm runtime, so the build's torch and the runtime's torch are the same module. This is the one piece the previous (failed) build was missing.
+- `--no-build-isolation` keeps the build tied to that torch instead of compiling against a transient build-environment torch — this is what prevents the `_ZN3c104cuda...` ABI crash at import time.
 - `--no-deps` prevents pip from upgrading the container's torch.
-- The pinned versions (`causal-conv1d==1.6.1`, `mamba-ssm==2.3.1`) are the pair previously verified to import cleanly against the container's `torch 2.10.0+cu128` (see README, 2026-04-29).
-- No `--nv` flag is needed — the build invokes `nvcc` for compilation but does not launch any CUDA kernels, so it does not need a GPU. Run on a CPU compute node with ≥ 32 GB RAM (login-node `/tmp` is too small and triggers OOM during the link step).
+- Versions are intentionally unpinned because torch 2.9 is recent (Oct 2025) and the matching mamba-ssm release moves quickly. If a specific pin is desired, pick whatever pip resolves on first install and record it in the README.
+- No `--nv` flag is needed for the build — it invokes `nvcc` for compilation but does not launch CUDA kernels, so it does not need a GPU. Run on a CPU compute node with ≥ 32 GB RAM (login-node `/tmp` is too small and triggers OOM during the link step).
 - Build time is 15–30 min on 8 CPUs.
 
-After the rebuild, verify the import:
+After the rebuild, verify the import. **`PYTHONNOUSERSITE=1` must be set here too** for the same reason, otherwise the verify shell loads `~/.local`'s torch and reports a misleading version:
 
 ```bash
 apptainer exec --bind $SCRATCH:$SCRATCH $SCRATCH/containers/nemotron_vllm.sif \
@@ -178,7 +201,7 @@ apptainer exec --bind $SCRATCH:$SCRATCH $SCRATCH/containers/nemotron_vllm.sif \
   "
 ```
 
-Expected output: `2.10.0+cu128 2.3.1 1.6.1`. Any other torch version means a stale `torch/` is sitting in `$SCRATCH/lora_pip` and shadowing the container's torch via `PYTHONPATH` — remove it (`rm -rf $SCRATCH/lora_pip/torch $SCRATCH/lora_pip/torch-*.dist-info $SCRATCH/lora_pip/nvidia*`) before rebuilding mamba-ssm, or the kernels will be built against the wrong ABI.
+The first column must equal the torch version printed inside the build shell. If it doesn't, the build environment was different from the runtime environment — most often because `PYTHONNOUSERSITE=1` was missing on one side, or because a torch dir was added/removed from `$SCRATCH/lora_pip` between build and verify. Mismatch ⇒ rebuild.
 
 ### Why this is safe versus the container's own packages
 
@@ -249,8 +272,8 @@ These three changes — split, training checkpoints, eval resume — are the rig
 
 sacct -j 6484958 --format=JobID,State,Elapsed,ExitCode
 Job ID(2026/5/1):6459431
-tail -n 50 logs/lora_verification_6484958.out
+tail -n 50 logs/lora_verification_6516064.out
 
-tail -n 50 logs/lora_verification_6484958.err
+tail -n 50 logs/lora_verification_6516064.err
 
 Job ID new(2026/5/1):6484958

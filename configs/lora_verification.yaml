@@ -9,26 +9,40 @@
 #   - rank <= 32 (we use 16 to stay clear of the cap)
 #   - sequence length aligned to the 8192 eval context (we train at 4096 to
 #     leave activation/KV headroom on a single H200 during backward)
-#   - target_modules = "all-linear" because Nemotron-3 Nano is a hybrid
-#     Mamba-2/MoE custom architecture; hard-coded q_proj/k_proj/v_proj/o_proj
-#     names are not guaranteed to exist or to cover the right layers.
+#   - target_modules MUST exclude MoE expert layers. vLLM 0.12.0's
+#     NemotronHForCausalLM does not implement get_expert_mapping, so any
+#     adapter containing LoRAs on MoE expert weights fails to load with
+#     "AttributeError: To support LoRA for MoE model, 'get_expert_mapping'
+#     must be implemented". Kaggle scores via vLLM, so this is a submission
+#     constraint, not just a local-eval one. Earlier "all-linear" guidance
+#     was inverted by this finding (job 6516064, 2026-05-02) — see
+#     docs/lora_strategy.md §3 "vLLM MoE LoRA constraint".
 
 model:
   name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
   dtype: bfloat16
   # Container's transformers (4.57.3) has no built-in NemotronHForCausalLM,
-  # so we must take the remote-code path. The remote modeling file probes
-  # mamba-ssm via transformers' is_mamba_2_ssm_available(); for the
-  # verification milestone we deliberately leave mamba-ssm out of
-  # $SCRATCH/lora_pip and use the slow pure-PyTorch Mamba path. The slurm
-  # script enforces this. See docs/lora_strategy.md §3 "Mamba-2 SSM extension".
+  # so we must take the remote-code path. The remote modeling code requires
+  # mamba-ssm + causal-conv1d to be importable (no PyTorch fallback); the
+  # slurm script verifies their presence in $SCRATCH/lora_pip.
   trust_remote_code: true
 
 lora:
   r: 16
   alpha: 32
   dropout: 0.0
-  target_modules: all-linear
+  # Attention-only target list. Substring-matched against module names, so
+  # this picks up q/k/v/o across all attention blocks and ignores MoE
+  # expert layers (mixer.experts.<idx>.down_proj/up_proj) and Mamba
+  # projections. Verification milestone: minimum-viable LoRA that vLLM
+  # will load. Broadening to Mamba/router layers is a follow-up once
+  # verification is green and we've confirmed which non-expert modules
+  # vLLM's NemotronHForCausalLM supports LoRA on.
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
   bias: none
   task_type: CAUSAL_LM
 

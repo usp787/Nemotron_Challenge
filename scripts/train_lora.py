@@ -11,11 +11,12 @@ proves the pipeline produces a valid HF/PEFT adapter directory
 eval harness will accept. It is not tuned for accuracy.
 
 Why these defaults:
-  - ``target_modules="all-linear"``: Nemotron-3 Nano is a hybrid
-    Mamba-2/MoE custom architecture loaded via ``trust_remote_code``.
-    Discovering all linear layers programmatically is more robust than
-    naming q_proj/k_proj/v_proj/o_proj and silently missing the MoE
-    expert layers or the Mamba projection layers.
+  - ``target_modules=[q_proj, k_proj, v_proj, o_proj]``: attention-only.
+    "all-linear" was the original choice but produced an adapter that
+    vLLM 0.12.0 refuses to load — its NemotronHForCausalLM lacks the
+    ``get_expert_mapping`` method needed to apply LoRA to MoE experts.
+    Since Kaggle scores via vLLM, the adapter must avoid expert layers
+    entirely. See docs/lora_strategy.md §3 "vLLM MoE LoRA constraint".
   - ``gradient_checkpointing=True``: 30B BF16 weights = ~60 GB; on a
     single H200 (143 GB), checkpointing keeps activation memory in
     range at ``max_seq_len=4096, batch=1``.
