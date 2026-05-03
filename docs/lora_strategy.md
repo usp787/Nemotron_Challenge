@@ -277,3 +277,33 @@ tail -n 50 logs/lora_verification_6518135.out
 tail -n 50 logs/lora_verification_6518135.err
 
 Job ID new(2026/5/1):6484958
+
+6519913
+tail -f logs/pull_vllm_lora_eval_6519913.out
+tail -f logs/pull_vllm_lora_eval_6519913.err
+
+
+6520105
+tail -f logs/pull_vllm_lora_eval_6520105.out
+tail -f logs/pull_vllm_lora_eval_6520105.err
+
+
+sacct -j 6520105 --format=JobID,JobName,Partition,AllocCPUS,State,Elapsed,ExitCode
+ls -lh outputs/lora_adapter_6520105
+ls -lh outputs/lora_eval_6520105.jsonl
+ls -lh outputs/submission_6520105.zip
+tail -n 5 outputs/lora_eval_6520105.jsonl
+
+
+6520423
+sacct -j 6520423 --format=JobID,JobName,Partition,AllocCPUS,State,Elapsed,ExitCode
+ls -lh outputs/lora_adapter_6520423
+ls -lh outputs/lora_eval_6520423.jsonl
+ls -lh outputs/submission_6520423.zip
+tail -n 5 outputs/lora_eval_6520423.jsonl
+
+
+
+apptainer exec --nv --bind $HOME/Nemotron_Challenge:/workspace $SCRATCH/containers/nemotron_vllm_v0200_cu129.sif bash -lc "cd /workspace && python3 scripts/evaluate.py --predictions outputs/base_eval_kaggle_compare.jsonl --score"
+
+apptainer exec --nv --bind $HOME/Nemotron_Challenge:/workspace --bind $SCRATCH:$SCRATCH $SCRATCH/containers/nemotron_vllm_v0200_cu129.sif bash -lc "cd /workspace && python3 scripts/baseline_generate.py --config configs/eval_kaggle_base.yaml --output outputs/base_eval_kaggle_compare.jsonl"

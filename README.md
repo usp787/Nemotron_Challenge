@@ -659,3 +659,18 @@ Without `PYTHONNOUSERSITE=1`, `~/.local`'s torch 2.10.0+cu128 is loaded instead.
 - **Quality of the verification score is still secondary.** Goal is end-to-end pipeline green, not leaderboard quality. AIME25 accuracy on a 200-sample × 1-epoch attention-only LoRA is expected to be near or below the no-LoRA baseline; that is fine for this pass.
 - **Follow-up: try `target_modules: all-linear` + `exclude_modules: "experts"` once verification is green.** Would broaden LoRA coverage to Mamba `mixer.in_proj`/`mixer.out_proj` (~46 tensors on top of the attention 48). Untested whether vLLM's `NemotronHForCausalLM` supports LoRA on Mamba mixer modules — last run never got past the MoE check to find out. Cheap experiment after the milestone is unblocked.
 - **Long-term: watch for upstream vLLM `get_expert_mapping` support on Nemotron-H.** If/when it ships, MoE-expert LoRA becomes viable and the strategy can revisit `all-linear` for richer adapters. Track via vLLM release notes; not urgent.
+
+### 2026-05-03 — LoRA verification pipeline green with newer vLLM eval image
+
+**End-of-day status:** Full LoRA verification finally passed end-to-end. Job 6520423 completed on H200 in 35:46 with exit code `0:0`, trained an `all-linear` PEFT adapter, loaded it through the newer vLLM 0.20.0 CUDA-12.9 eval image, generated AIME25 predictions, scored, and packaged a Kaggle-style submission zip.
+
+**Artifacts from job 6520423:**
+
+- Adapter: `outputs/lora_adapter_6520423/`
+- Eval predictions: `outputs/lora_eval_6520423.jsonl` (596 KB)
+- Submission package: `outputs/submission_6520423.zip` (1.6 GB)
+- Adapter weight file: `adapter_model.safetensors` (1.7 GB)
+
+**What this proves:** the full verification path now works: data prep -> HF/PEFT LoRA training -> adapter save -> vLLM LoRA load -> AIME25 generation -> scoring -> submission packaging. The key unblock was using two containers: the known-good vLLM 0.12.0 container for training, and `vllm/vllm-openai:v0.20.0-cu129` for LoRA-enabled eval. The one-prompt H200 probe, job 6520105, verified the new eval image could initialize Nemotron-H MoE LoRA and generate with `error: null` before spending the full allocation.
+
+**Important caveat:** this is a pipeline milestone, not proof of accuracy improvement. The older AIME25 baseline was run under a different token budget/decoding setup, so it is not a clean comparison. For a paired comparison, run the base model with [configs/eval_kaggle_base.yaml](configs/eval_kaggle_base.yaml) and compare its score against `outputs/lora_eval_6520423.jsonl` under the same `max_model_len=8192`, `max_tokens=7680`, greedy eval params.
