@@ -63,12 +63,13 @@ Step 2. Submit the training job (cluster login node)
 
 Capture the job ID printed by sbatch; call it $TRAIN_ID.
 
-train ID:6525101
+train ID:6525101(finished)
 
 Watch progress:
 
     squeue -u $USER
-    tail -f logs/lora_train_${TRAIN_ID}.out
+    tail -f logs/lora_train_6525101.out
+    tail -f logs/lora_train_6525101.err
 
 Pass criteria for train.slurm:
 - Stage 3 prints loss decreasing across optim steps.
@@ -124,3 +125,123 @@ References
 - slurm/eval.slurm                 -- 1h paired eval + packaging job
 
 
+Iteration 2 (2026-05-04) -- post-mortem and new policy
+======================================================
+
+Iteration 1 result (train 6525101, eval 6533534)
+------------------------------------------------
+- Base model AIME25 accuracy: 33.3% (10/30).
+- LoRA-adapted accuracy:      30.0% (9/30).
+- Net effect of training: ~zero (1-problem delta is well within noise).
+
+Why nothing happened
+--------------------
+Training loss was *flat* across all 187 optim steps (~0.30 throughout,
+no descent despite cosine LR decay). Two coupled root causes:
+
+1. Data-pipeline truncation. train_lora.py truncates the tokenized full
+   sequence at max_seq_len=4096. OpenMathReasoning CoT traces routinely
+   run 5K-15K tokens, so for most samples the closing \boxed{...} was
+   silently sliced off before the loss saw it. The supervision target
+   degenerated into "predict the first 4096 tokens of long CoT" -- which
+   is exactly the mid-reasoning rambling the base model already produces.
+   No new behavior to learn => no gradient signal => flat loss.
+
+2. Eval-time truncation. With Kaggle's 7680-token cap, 19-20 of 30 AIME25
+   responses hit the cap in mid-reasoning without ever emitting \boxed{}.
+   Of 21 LoRA no-boxed responses, 18 were at exactly 7680 tokens.
+   Repetition loops at temperature=0.0 made it worse on a few prompts
+   (e.g. aime25_05 LoRA: "3 + 4 + 5 + 6=18.\n\n" repeated until cap).
+
+Diagnostic blindspot we hit
+---------------------------
+baseline_generate.py was not saving vLLM's finish_reason or response
+token count, so we could not directly see truncation in the predictions
+JSONL -- we had to back-tokenize after the fact. Iteration 2 fixes this
+in the script.
+
+Iteration 2 policy
+------------------
+Pick *short complete* training traces; do not increase data volume or
+epochs. The key thing is to pick short reasoning trace data to force
+the model to shift to shorter reasoning, rather than blindly increase
+data volume or epoch count.
+
+Concrete changes (already applied):
+
+- scripts/prepare_reasoning_traces.py
+  - Default --max-trace-chars lowered 14000 -> 10000 (~3.3K tokens),
+    so every trace fits comfortably under the new max_seq_len.
+  - New --shortest-of <N> flag: collect N filter-passing candidates
+    then keep the shortest --num. Biases the training distribution
+    toward concise traces -- the format/length-forcing target.
+  - Prints a length distribution summary at the end.
+
+- configs/lora_verification.yaml
+  - data.max_seq_len: 4096 -> 8192 (matches Kaggle eval context).
+    H200 + grad checkpointing + rank=16 fits comfortably.
+
+- scripts/baseline_generate.py
+  - Records now include finish_reason and num_response_tokens, so
+    truncation is directly visible in future eval JSONLs.
+
+What stayed the same:
+- rank=16, target_modules=all-linear, LR=2e-4 cosine, 1 epoch,
+  3000 samples, response masking on. Change one variable at a time;
+  these were not shown to be limiting in iteration 1.
+
+Pass criteria for iteration 2
+-----------------------------
+Training (lora_train_<ID>.out):
+- Loss visibly descends below ~0.20 by step 50 and below ~0.10 by
+  step 150. If still flat at ~0.30, the data fix didn't bite and we
+  should re-investigate before retrying.
+
+Eval (lora_eval_<ID>):
+- Mean response length: drops from ~6800 tokens to <4000 tokens.
+- finish_reason='length' count: drops from 19/30 to <5/30.
+- no_boxed count: drops from 21/30 to <5/30.
+- LoRA accuracy >= base accuracy (was 30 vs 33.3%).
+Accuracy numbers are downstream of the first three; if the length and
+truncation fixes land but accuracy doesn't, the next iteration moves
+to a quality filter (e.g. min_pass_rate, prefer-correct sampling).
+
+Iteration 2 cluster recipe
+--------------------------
+Step 1 (Windows). Regenerate data with the short-trace bias:
+
+    python scripts\prepare_reasoning_traces.py --num 3000 --shortest-of 6000
+
+    # Verify line count and skim the length-distribution summary the
+    # script now prints; expect approx-token median in the 1.5K-3K range.
+
+Transfer:
+
+    scp data\lora_traces.jsonl <user>@<host>:<project_path>/data/
+
+Step 2 (cluster). git pull, then submit train:
+
+    cd $HOME/Nemotron_Challenge
+    git pull
+    sbatch slurm/train.slurm
+
+Step 3 (cluster). After train finishes, submit eval pinned to the new
+adapter:
+
+    LORA_ADAPTER_DIR=$HOME/Nemotron_Challenge/outputs/lora_adapter_<TRAIN_ID> \
+        sbatch slurm/eval.slurm
+
+Step 4 (cluster). Read the new fields:
+
+    grep -E "Accuracy|Mean response length" logs/lora_eval_<EVAL_ID>.out
+    python3 -c "
+    import json, collections
+    for p in ['outputs/base_eval_<EVAL_ID>.jsonl', 'outputs/lora_eval_<EVAL_ID>.jsonl']:
+        n=0; cap=0; nb=0; reasons=collections.Counter()
+        for line in open(p):
+            r=json.loads(line); n+=1
+            reasons[r.get('finish_reason')]+=1
+            if r.get('finish_reason')=='length': cap+=1
+            if '\\\\boxed{' not in (r.get('response') or ''): nb+=1
+        print(p, 'n=', n, 'at_cap=', cap, 'no_boxed=', nb, 'reasons=', dict(reasons))
+    "

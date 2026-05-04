@@ -127,6 +127,8 @@ def main() -> None:
                 "expected_answer": item.get("expected_answer"),
                 "response": None,
                 "latency_sec": None,
+                "finish_reason": None,
+                "num_response_tokens": None,
                 "model": model_cfg["name"],
                 "backend": runtime_cfg.get("backend", "vllm"),
                 "error": None,
@@ -138,7 +140,16 @@ def main() -> None:
                     gen_kwargs["lora_request"] = lora_request
                 outputs = llm.generate([formatted_prompt], sampling, **gen_kwargs)
                 record["latency_sec"] = round(time.perf_counter() - t0, 3)
-                record["response"] = outputs[0].outputs[0].text
+                gen = outputs[0].outputs[0]
+                record["response"] = gen.text
+                # finish_reason='length' means we hit max_tokens before the
+                # model emitted EOS -- i.e. the trace was cut off. Critical
+                # for diagnosing whether a missing \boxed{} is truncation
+                # vs. format collapse (see iteration 1 post-mortem).
+                record["finish_reason"] = getattr(gen, "finish_reason", None)
+                token_ids = getattr(gen, "token_ids", None)
+                if token_ids is not None:
+                    record["num_response_tokens"] = len(token_ids)
                 successes += 1
             except Exception as exc:
                 record["error"] = f"{type(exc).__name__}: {exc}"

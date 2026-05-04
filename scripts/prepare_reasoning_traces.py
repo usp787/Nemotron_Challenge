@@ -33,10 +33,26 @@ Filter rules (configurable, see CLI flags):
   - "\\boxed{" in generated_solution
                                  final answer must be boxed for
                                  inference-time format alignment.
-  - len(generated_solution) <= ``--max-trace-chars`` (default 14000)
-                                 ~ 4-4.5K tokens at typical 3 chars/tok.
-                                 Headroom under the 7680-token eval cap
-                                 and the 4096-token training max_seq_len.
+  - len(generated_solution) <= ``--max-trace-chars`` (default 10000)
+                                 ~ 3.3K tokens at typical 3 chars/tok.
+                                 Sized so the assistant turn fits well
+                                 below the 8192-token training max_seq_len
+                                 with headroom for the prompt, AND well
+                                 below the 7680-token eval cap. The
+                                 previous 14000-char cap let traces
+                                 through that train_lora.py then had to
+                                 truncate, dropping the closing \boxed{}
+                                 from the loss target -- iteration 1's
+                                 root cause of flat training loss.
+  - --shortest-of (default 0 = disabled)
+                                 if > --num, collect that many candidates
+                                 that pass all other filters, then sort
+                                 by trace length and keep the shortest
+                                 --num. Biases the training distribution
+                                 toward concise traces so the LoRA learns
+                                 to finish quickly (the actual goal),
+                                 rather than uniformly sampling from
+                                 OpenMathReasoning's long-skewed pool.
   - --min-pass-rate (default 0.0, optional)
                                  if set > 0, requires pass_rate_72b_tir
                                  numeric value >= threshold; rows with
@@ -185,8 +201,17 @@ def to_record(row: dict, idx: int) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--num", type=int, default=200, help="target sample count after filter")
-    ap.add_argument("--max-trace-chars", type=int, default=14000)
-    ap.add_argument("--max-pages", type=int, default=200, help="safety cap on pagination")
+    ap.add_argument("--max-trace-chars", type=int, default=10000)
+    ap.add_argument(
+        "--shortest-of",
+        type=int,
+        default=0,
+        help="if > --num, collect this many filter-passing candidates first, "
+        "then sort by trace length and keep the shortest --num. Used to bias "
+        "the training distribution toward concise traces so the LoRA actually "
+        "learns to finish quickly. 0 disables (matches old first-N behavior).",
+    )
+    ap.add_argument("--max-pages", type=int, default=400, help="safety cap on pagination")
     ap.add_argument("--output", default="data/lora_traces.jsonl")
     ap.add_argument("--start-offset", type=int, default=0)
     ap.add_argument(
@@ -207,12 +232,16 @@ def main() -> None:
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    target_pool = max(args.num, args.shortest_of)
+    bias_shortest = args.shortest_of > args.num
+
     kept: list[dict] = []
+    kept_lens: list[int] = []  # parallel to kept; used for shortest-of sort
     rejects: dict[str, int] = {}
     pages_seen = 0
     offset = args.start_offset
 
-    while len(kept) < args.num and pages_seen < args.max_pages:
+    while len(kept) < target_pool and pages_seen < args.max_pages:
         rows = fetch_page(offset, PAGE_SIZE)
 
         if pages_seen == 0 and rows:
@@ -238,7 +267,8 @@ def main() -> None:
         for i, row in enumerate(rows):
             if keep(row, args.max_trace_chars, args.min_pass_rate):
                 kept.append(to_record(row, offset + i))
-                if len(kept) >= args.num:
+                kept_lens.append(len(row["generated_solution"]))
+                if len(kept) >= target_pool:
                     break
             else:
                 tag = reject_reason(row, args.max_trace_chars, args.min_pass_rate)
@@ -246,9 +276,9 @@ def main() -> None:
 
         offset += len(rows)
         pages_seen += 1
-        print(f"[info] page {pages_seen}: scanned={offset} kept={len(kept)}/{args.num}")
+        print(f"[info] page {pages_seen}: scanned={offset} kept={len(kept)}/{target_pool}")
 
-        if len(kept) < args.num and args.page_sleep > 0:
+        if len(kept) < target_pool and args.page_sleep > 0:
             time.sleep(args.page_sleep)
 
     if not kept:
@@ -261,12 +291,33 @@ def main() -> None:
             "If schema drifted, update keep() to match."
         )
 
+    if bias_shortest and len(kept) > args.num:
+        order = sorted(range(len(kept)), key=lambda i: kept_lens[i])[: args.num]
+        kept = [kept[i] for i in order]
+        kept_lens = [kept_lens[i] for i in order]
+        print(
+            f"[info] shortest-of bias active: kept the {args.num} shortest "
+            f"of {args.shortest_of} candidates."
+        )
+
     with open(out_path, "w", encoding="utf-8") as f:
         for rec in kept:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     print(f"Wrote {len(kept)} traces -> {out_path}")
     print(f"Scanned {offset - args.start_offset} source rows across {pages_seen} pages.")
+    if kept_lens:
+        sl = sorted(kept_lens)
+        n = len(sl)
+        print(
+            "Trace length (chars): "
+            f"min={sl[0]} p25={sl[n // 4]} median={sl[n // 2]} "
+            f"p75={sl[(3 * n) // 4]} p90={sl[int(0.9 * n)]} max={sl[-1]}"
+        )
+        print(
+            "  approx tokens (~3 chars/tok): "
+            f"median={sl[n // 2] // 3} p90={sl[int(0.9 * n)] // 3} max={sl[-1] // 3}"
+        )
     if rejects:
         print("Reject tally:")
         for tag, n in sorted(rejects.items(), key=lambda kv: -kv[1]):

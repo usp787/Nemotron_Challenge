@@ -7,8 +7,15 @@
 #
 # Constraints driven by Kaggle eval (see configs/eval_kaggle.yaml):
 #   - rank <= 32 (we use 16 to stay clear of the cap)
-#   - sequence length aligned to the 8192 eval context (we train at 4096 to
-#     leave activation/KV headroom on a single H200 during backward)
+#   - sequence length aligned to the 8192 eval context. Iteration 1 trained at
+#     max_seq_len=4096 and produced a flat loss curve because long traces had
+#     their \boxed{} ending silently truncated out of the supervision signal,
+#     so the model was being taught to predict mid-CoT rambling -- exactly
+#     what the base model already does. Iteration 2 raises max_seq_len to
+#     8192 (matches eval context) AND lowers the data-side max_trace_chars
+#     so every example fits end-to-end with the closing \boxed{} intact.
+#     Activation memory at 8192/batch=1 with gradient_checkpointing fits
+#     comfortably on a single H200 (143 GB) at rank=16.
 #   - target_modules is restored to "all-linear" so the verification adapter
 #     covers attention, Mamba projections, and MoE expert projections. The old
 #     vLLM 0.12.0 eval image cannot load this adapter because its Nemotron-H
@@ -38,7 +45,10 @@ lora:
 
 data:
   input_path: data/lora_traces.jsonl
-  max_seq_len: 4096
+  # Matches the Kaggle eval context window (8192). Pair this with a
+  # max_trace_chars cap on the data-prep side so every assistant turn fits
+  # end-to-end with the closing \boxed{} included in the loss target.
+  max_seq_len: 8192
   # Loss is computed on the assistant turn only; user prompt tokens get
   # label=-100. Set to false to train on full sequence (less faithful to
   # the inference-time distribution but slightly simpler).
