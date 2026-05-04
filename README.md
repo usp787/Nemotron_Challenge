@@ -674,3 +674,16 @@ Without `PYTHONNOUSERSITE=1`, `~/.local`'s torch 2.10.0+cu128 is loaded instead.
 **What this proves:** the full verification path now works: data prep -> HF/PEFT LoRA training -> adapter save -> vLLM LoRA load -> AIME25 generation -> scoring -> submission packaging. The key unblock was using two containers: the known-good vLLM 0.12.0 container for training, and `vllm/vllm-openai:v0.20.0-cu129` for LoRA-enabled eval. The one-prompt H200 probe, job 6520105, verified the new eval image could initialize Nemotron-H MoE LoRA and generate with `error: null` before spending the full allocation.
 
 **Important caveat:** this is a pipeline milestone, not proof of accuracy improvement. The older AIME25 baseline was run under a different token budget/decoding setup, so it is not a clean comparison. For a paired comparison, run the base model with [configs/eval_kaggle_base.yaml](configs/eval_kaggle_base.yaml) and compare its score against `outputs/lora_eval_6520423.jsonl` under the same `max_model_len=8192`, `max_tokens=7680`, greedy eval params.
+
+### 2026-05-03 — All-layer LoRA training verified; first full-data train job queued (6525101)
+
+**End-of-day status:** All-layer LoRA training (`target_modules=all-linear`, attention + Mamba projections + MoE experts) is verified end-to-end through the newer vLLM 0.20.0 LoRA-capable eval image. Pipeline plumbing is now split into two chained Slurm jobs — [slurm/train.slurm](slurm/train.slurm) (4h H200, train only) and [slurm/eval.slurm](slurm/eval.slurm) (1h H200, paired base-vs-LoRA eval at Kaggle params + submission packaging) — so eval crashes no longer re-cost training. The first full-data run scaled from the 200-sample verification set to **3000 samples × 1 epoch** of `nvidia/OpenMathReasoning` CoT traces and is currently queued as job **6525101** on the gpu partition.
+
+**What this milestone is and isn't:**
+
+- Is: proof that the all-linear LoRA training + LoRA-capable vLLM eval path is reproducible at production-sized data, and the train/eval split is wired correctly with `--dependency=afterok` chaining.
+- Isn't: a quality result. Job 6525101 is still PD/queued; AIME25 numbers come after it and the chained eval finish.
+
+**Strategy details live in [train_strategies.txt](train_strategies.txt)**, not duplicated here. That file owns: the three open problems (length forcing, walltime/checkpointing, training-data shape), the first-run hyperparameters, the local data-prep recipe, the cluster command sequence, and the post-run decision tree (LoRA >> base / ~= base / < base). Treat it as the live playbook for this iteration.
+
+**Next session:** harvest job 6525101's training log + the chained eval scores, record the paired AIME25 delta, and route the next iteration off the decision tree in [train_strategies.txt](train_strategies.txt).

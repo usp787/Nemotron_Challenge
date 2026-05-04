@@ -63,6 +63,8 @@ Step 2. Submit the training job (cluster login node)
 
 Capture the job ID printed by sbatch; call it $TRAIN_ID.
 
+train ID:6525101
+
 Watch progress:
 
     squeue -u $USER
@@ -120,3 +122,5 @@ References
 - configs/eval_kaggle_base.yaml    -- LoRA-off paired baseline config
 - slurm/train.slurm                -- 4h train job
 - slurm/eval.slurm                 -- 1h paired eval + packaging job
+
+
