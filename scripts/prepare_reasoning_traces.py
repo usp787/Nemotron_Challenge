@@ -326,3 +326,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+#C:/Users/usp78/AppData/Local/Programs/Python/Python311/python.exe c:/Users/usp78/Desktop/Nemotron_Challenge/Nemotron_Challenge/scripts/prepare_reasoning_traces.py --num 3000 --shortest-of 6000
