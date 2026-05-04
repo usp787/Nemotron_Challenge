@@ -1,0 +1,122 @@
+Train strategy (2026-05-03)
+================================================================
+
+Open problems
+-------------
+1. Box / reasoning-length adjustment.
+   Kaggle eval cap is 7680 greedy tokens; baseline AIME25 traces run
+   ~17K tokens and truncate mid-answer. The LoRA's job is to shift the
+   response distribution toward concise traces that finish inside the
+   budget with a balanced \boxed{}.
+2. Training time per job / checkpoints / HPC walltime policy.
+   Verification ran train+eval together in 4h. For real runs we split
+   into a 4h train job and a 1h eval job chained via afterok, so eval
+   crashes don't re-cost training.
+3. What kind of training data?
+   LoRA is *not* trying to invent reasoning -- the 30B base already has
+   it. LoRA's job is format/length forcing: end earlier, box decisively.
+   SFT-only is enough for this (s1, DAST, Self-Braking Tuning).
+   Data source: nvidia/OpenMathReasoning CoT split, length-filtered.
+
+First full-data run (this iteration)
+------------------------------------
+- 3K samples, 1 epoch, rank 16, target_modules=all-linear.
+- Train 4h H200, eval 1h H200, paired base-vs-LoRA on AIME25.
+- Reuses configs/lora_verification.yaml (same hyperparams, just more data).
+- Goal: see if a real-sized LoRA moves the needle vs the base model
+  under Kaggle decoding params. NOT yet a tuning run.
+
+Pipeline
+--------
+  data prep (local)  ->  train.slurm (4h)  ->  eval.slurm (1h)
+                              |                     |
+                              v                     v
+                         lora_adapter         base + LoRA scores,
+                         archive dir          submission.zip
+
+Step 1. Data prep -- run on this Windows box (no GPU needed)
+------------------------------------------------------------
+Both scripts are pure-stdlib HTTP fetchers against the HF datasets-server
+REST API. They take ~5 min (AIME25) and ~10-30 min (3K OpenMathReasoning,
+depending on rate-limit backoff). Output is small JSONL.
+
+From PowerShell, in the project root:
+
+    python scripts\prepare_aime25.py
+    python scripts\prepare_reasoning_traces.py --num 3000
+
+Verify:
+
+    Get-Content data\aime25.jsonl       | Measure-Object -Line   # expect 30
+    Get-Content data\lora_traces.jsonl  | Measure-Object -Line   # expect 3000
+
+Transfer to the cluster (replace <user>@<host> and <project_path>):
+
+    scp data\aime25.jsonl       <user>@<host>:<project_path>/data/
+    scp data\lora_traces.jsonl  <user>@<host>:<project_path>/data/
+
+Step 2. Submit the training job (cluster login node)
+----------------------------------------------------
+    cd $HOME/Nemotron_Challenge
+    git pull
+    sbatch slurm/train.slurm
+
+Capture the job ID printed by sbatch; call it $TRAIN_ID.
+
+Watch progress:
+
+    squeue -u $USER
+    tail -f logs/lora_train_${TRAIN_ID}.out
+
+Pass criteria for train.slurm:
+- Stage 3 prints loss decreasing across optim steps.
+- Stage 4 produces outputs/lora_adapter_${TRAIN_ID}/ with
+  adapter_config.json + adapter_model.safetensors.
+- Job exits 0 within 4h.
+
+Step 3. Submit the eval job (chain after train)
+-----------------------------------------------
+    sbatch --dependency=afterok:$TRAIN_ID slurm/eval.slurm
+
+eval.slurm runs two evals back-to-back at Kaggle params:
+  - configs/eval_kaggle_base.yaml  (LoRA disabled, paired baseline)
+  - configs/eval_kaggle.yaml       (LoRA enabled, our adapter)
+then prints both AIME25 scores and packages submission_<JOB_ID>.zip.
+
+Watch:
+
+    tail -f logs/lora_eval_*.out
+
+Pass criteria for eval.slurm:
+- Both eval JSONLs produced, no run-wide errors.
+- Stage 5 prints two accuracy numbers. The LoRA number should be
+  >= base; if not, the data filter / rank / epochs need rethinking.
+- outputs/submission_${EVAL_ID}.zip exists.
+
+Re-running eval against an existing adapter
+-------------------------------------------
+The eval job is independent of the train job. To rescore a specific
+archived adapter without retraining:
+
+    LORA_ADAPTER_DIR=$HOME/Nemotron_Challenge/outputs/lora_adapter_<JOB_ID> \
+        sbatch slurm/eval.slurm
+
+Decision points after this run
+------------------------------
+- LoRA score >> base: bump rank to 32, try 2 epochs, larger sample
+  count -- but checkpointing in train_lora.py becomes mandatory then,
+  since 5K x 2 epochs won't fit a single 4h slot.
+- LoRA score ~= base: data is the problem. Tighten the length-tail
+  filter, bias toward shorter correct traces, A/B enable_thinking.
+- LoRA score < base: format collapse from too-aggressive filtering or
+  bad target_modules. Diagnose with a one-prompt probe via
+  slurm/lora_vllm_probe.slurm.
+
+References
+----------
+- docs/lora_strategy.md            -- full strategy + setup recipe
+- configs/lora_verification.yaml   -- training config (reused for 3K run)
+- configs/eval_kaggle.yaml         -- LoRA-on eval config
+- configs/eval_kaggle_base.yaml    -- LoRA-off paired baseline config
+- slurm/train.slurm                -- 4h train job
+- slurm/eval.slurm                 -- 1h paired eval + packaging job
