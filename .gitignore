@@ -6,8 +6,8 @@ outputs/
 *.jsonl
 !data/sample_prompts_5.jsonl
 !data/lora_probe_prompt.jsonl
-!data/aime25.jsonl
-!data/lora_traces.jsonl
+!data/sft_train.jsonl
+!data/sft_holdout.jsonl
 
 # LoRA training artifacts
 outputs/lora_adapter*/
