@@ -35,9 +35,11 @@ TRAIN_CONTAINER=$SCRATCH/containers/nemotron_vllm.sif
 LORA_PIP_DIR=$SCRATCH/lora_pip
 TRAIN_CONFIG=${TRAIN_CONFIG:-configs/lora_verification.yaml}
 
-# train_lora.py writes to outputs/lora_adapter (per the YAML); we cp to a
-# per-job archival dir so reruns don't clobber. eval.slurm reads
-# outputs/lora_adapter by default, which always points to the latest run.
+# train_lora.py writes to outputs/lora_adapter (per the YAML). After training
+# we mv the real directory into a per-job archive and replace
+# outputs/lora_adapter with a symlink to it, so eval.slurm's default path
+# always resolves to the latest run while older runs remain pinnable via
+# LORA_ADAPTER_DIR=outputs/lora_adapter_<job_id>.
 ADAPTER_ARCHIVE=outputs/lora_adapter_${SLURM_JOB_ID}
 
 export HF_HOME=$SCRATCH/huggingface
@@ -88,6 +90,12 @@ apptainer exec --nv $TRAIN_CONTAINER nvidia-smi >/dev/null && echo "training vLL
 
 echo ""
 echo "=== Stage 3: Train LoRA adapter ==="
+# train_lora.py saves to outputs/lora_adapter via the YAML. If that path is
+# a stale symlink from a prior run, save_pretrained() would follow it and
+# overwrite the previous run's archived adapter. Clear it so the trainer
+# writes a fresh real directory.
+rm -rf $PROJECT_DIR/outputs/lora_adapter
+
 apptainer exec --nv \
   --bind $PROJECT_DIR:/workspace \
   --bind $SCRATCH:$SCRATCH \
@@ -103,11 +111,19 @@ apptainer exec --nv \
 
 echo ""
 echo "=== Stage 4: Archive adapter to per-job dir ==="
-if [ -d $PROJECT_DIR/outputs/lora_adapter ]; then
-    rm -rf $PROJECT_DIR/$ADAPTER_ARCHIVE
-    cp -r $PROJECT_DIR/outputs/lora_adapter $PROJECT_DIR/$ADAPTER_ARCHIVE
-    ls -lh $PROJECT_DIR/$ADAPTER_ARCHIVE
+# Trainer just wrote a real directory at outputs/lora_adapter. Move it to the
+# per-job archive (mv avoids 1.7 GB of duplication and never preserves a
+# stale symlink the way `cp -r` would), then replace outputs/lora_adapter
+# with a symlink to the archive so eval.slurm's default path resolves.
+if [ -L $PROJECT_DIR/outputs/lora_adapter ] || [ ! -d $PROJECT_DIR/outputs/lora_adapter ]; then
+    echo "FAIL: outputs/lora_adapter is a symlink or missing -- trainer did not save a real directory."
+    exit 1
 fi
+rm -rf $PROJECT_DIR/$ADAPTER_ARCHIVE
+mv $PROJECT_DIR/outputs/lora_adapter $PROJECT_DIR/$ADAPTER_ARCHIVE
+ln -s $PROJECT_DIR/$ADAPTER_ARCHIVE $PROJECT_DIR/outputs/lora_adapter
+ls -lh $PROJECT_DIR/$ADAPTER_ARCHIVE
+ls -la $PROJECT_DIR/outputs/lora_adapter
 
 echo ""
 echo "=== Stage 5: Adapter shape verification ==="

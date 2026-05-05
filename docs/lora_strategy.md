@@ -315,5 +315,5 @@ tail -f logs/lora_train_6540448.err
 tail -f logs/lora_train_6540448.out | grep -E "step|loss"
 
 6547439(2026/5/4, eval)
-tail -f logs/lora_eval_6547439.out
-tail -f logs/lora_eval_6547439.err
+tail -f logs/lora_eval_6561645.out
+tail -f logs/lora_eval_6561645.err
