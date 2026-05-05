@@ -349,6 +349,7 @@ Step 3. Cluster: pull, train, watch live:
 
     cd $HOME/Nemotron_Challenge && git pull && sbatch slurm/train.slurm
     # capture $TRAIN_ID; iteration 3 has live step logs:
+    train_id:6554862(2026/5/4)
     tail -f logs/lora_train_${TRAIN_ID}.out
 
 Step 4. Eval. Submit on either GPU type, or both for queue racing:
