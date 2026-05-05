@@ -64,8 +64,8 @@ test -f "$ADAPTER_DIR/adapter_config.json" || {
     echo "FAIL: adapter_config.json missing -- adapter is incomplete."
     exit 1
 }
-test -f data/aime25.jsonl || {
-    echo "FAIL: data/aime25.jsonl missing -- run prepare_aime25.py first."
+test -f data/sft_holdout.jsonl || {
+    echo "FAIL: data/sft_holdout.jsonl missing -- run scripts/prepare_kaggle_sft.py first."
     exit 1
 }
 ls -lh "$ADAPTER_DIR"

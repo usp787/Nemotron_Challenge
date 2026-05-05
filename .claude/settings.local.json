@@ -14,7 +14,9 @@
       "Bash(git add *)",
       "Bash(python -c ' *)",
       "Bash(python3 -c ' *)",
-      "Bash(py -3 -c ' *)"
+      "Bash(py -3 -c ' *)",
+      "Bash(ls -la \"c:\\\\Users\\\\usp78\\\\Desktop\\\\Nemotron_Challenge\\\\Nemotron_Challenge\\\\memory\" 2>&1; ls \"C:\\\\Users\\\\usp78\\\\.claude\\\\projects\\\\c--Users-usp78-Desktop-Nemotron-Challenge-Nemotron-Challenge\\\\memory\\\\\" 2>&1)",
+      "Read(//c/Users/usp78/.claude/projects/c--Users-usp78-Desktop-Nemotron-Challenge-Nemotron-Challenge/**)"
     ]
   }
 }

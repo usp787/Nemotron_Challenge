@@ -32,7 +32,7 @@ data:
   # reasonable proxy until the Kaggle test set distribution is better
   # understood; swap input_path to any boxed-answer JSONL with
   # expected_answer fields.
-  input_path: data/aime25.jsonl
+  input_path: data/sft_holdout.jsonl
   output_dir: outputs
 
 logging:

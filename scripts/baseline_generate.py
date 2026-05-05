@@ -26,9 +26,9 @@ def read_prompts(path: str) -> list[dict]:
         raise FileNotFoundError(
             f"Input JSONL not found: {prompt_path}. "
             "Smoke runs use data/sample_prompts_5.jsonl (tracked in git). "
-            "AIME25 baseline runs require data/aime25.jsonl - generate it "
-            "with `python3 scripts/prepare_aime25.py` from a node with "
-            "outbound internet (typically the login node)."
+            "Other runs require a JSONL of {id, prompt, ...} records - see "
+            "the config's data.input_path and the matching data prep script "
+            "(e.g. scripts/prepare_kaggle_sft.py for the Kaggle target)."
         )
 
     items: list[dict] = []
