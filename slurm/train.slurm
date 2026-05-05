@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=192G
-#SBATCH --time=04:00:00
+#SBATCH --time=05:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
@@ -47,6 +47,11 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 # Same rationale as smoke_test.slurm and lora_verification.slurm: ignore
 # ~/.local user-site so we use the container's vllm 0.12.0 + matched torch.
 export PYTHONNOUSERSITE=1
+# Iteration 2 ran 3h with no visible step logs because Python's default block
+# buffering held all stdout in a buffer until the process exited. Turning off
+# buffering makes train_lora.py's [step N/187] lines show up live in tail -f
+# so a non-learning run can be early-aborted instead of waiting walltime out.
+export PYTHONUNBUFFERED=1
 
 mkdir -p $PROJECT_DIR/outputs $PROJECT_DIR/logs
 

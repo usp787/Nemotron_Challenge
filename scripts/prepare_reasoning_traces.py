@@ -44,6 +44,16 @@ Filter rules (configurable, see CLI flags):
                                  truncate, dropping the closing \boxed{}
                                  from the loss target -- iteration 1's
                                  root cause of flat training loss.
+  - len(generated_solution) >= ``--min-trace-chars`` (default 0 = off)
+                                 lower bound. Used to build a stratified
+                                 training set across length bins: e.g.
+                                 short bin --max-trace-chars 6000 plus
+                                 medium bin --min-trace-chars 9000
+                                 --max-trace-chars 15000. Iteration 3's
+                                 hypothesis is that hard AIME problems
+                                 need 3-5K reasoning tokens, so the LoRA
+                                 must see medium-length completions in
+                                 training, not only short ones.
   - --shortest-of (default 0 = disabled)
                                  if > --num, collect that many candidates
                                  that pass all other filters, then sort
@@ -142,13 +152,13 @@ def parse_pass_rate(value) -> float | None:
         return None
 
 
-def keep(row: dict, max_chars: int, min_pass_rate: float) -> bool:
+def keep(row: dict, max_chars: int, min_chars: int, min_pass_rate: float) -> bool:
     if (row.get("inference_mode") or "").lower() != "cot":
         return False
     if (row.get("problem_type") or "") != "has_answer_extracted":
         return False
     sol = row.get("generated_solution") or ""
-    if not sol or len(sol) > max_chars:
+    if not sol or len(sol) > max_chars or len(sol) < min_chars:
         return False
     if "\\boxed{" not in sol:
         return False
@@ -161,7 +171,7 @@ def keep(row: dict, max_chars: int, min_pass_rate: float) -> bool:
     return True
 
 
-def reject_reason(row: dict, max_chars: int, min_pass_rate: float) -> str:
+def reject_reason(row: dict, max_chars: int, min_chars: int, min_pass_rate: float) -> str:
     """Return a short tag explaining why a row was rejected (for stats)."""
     if (row.get("inference_mode") or "").lower() != "cot":
         return "not_cot"
@@ -172,6 +182,8 @@ def reject_reason(row: dict, max_chars: int, min_pass_rate: float) -> str:
         return "empty_solution"
     if len(sol) > max_chars:
         return "trace_too_long"
+    if len(sol) < min_chars:
+        return "trace_too_short"
     if "\\boxed{" not in sol:
         return "no_boxed"
     if not (row.get("problem") or "").strip():
@@ -202,6 +214,15 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--num", type=int, default=200, help="target sample count after filter")
     ap.add_argument("--max-trace-chars", type=int, default=10000)
+    ap.add_argument(
+        "--min-trace-chars",
+        type=int,
+        default=0,
+        help="lower bound on trace length in chars. Use to build a "
+        "stratified training set: e.g. --min-trace-chars 9000 "
+        "--max-trace-chars 15000 collects medium-length traces "
+        "(~3-5K tokens). 0 disables the lower bound.",
+    )
     ap.add_argument(
         "--shortest-of",
         type=int,
@@ -265,13 +286,13 @@ def main() -> None:
             break
 
         for i, row in enumerate(rows):
-            if keep(row, args.max_trace_chars, args.min_pass_rate):
+            if keep(row, args.max_trace_chars, args.min_trace_chars, args.min_pass_rate):
                 kept.append(to_record(row, offset + i))
                 kept_lens.append(len(row["generated_solution"]))
                 if len(kept) >= target_pool:
                     break
             else:
-                tag = reject_reason(row, args.max_trace_chars, args.min_pass_rate)
+                tag = reject_reason(row, args.max_trace_chars, args.min_trace_chars, args.min_pass_rate)
                 rejects[tag] = rejects.get(tag, 0) + 1
 
         offset += len(rows)

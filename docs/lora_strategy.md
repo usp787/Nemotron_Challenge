@@ -306,3 +306,14 @@ tail -n 5 outputs/lora_eval_6520423.jsonl
 apptainer exec --nv --bind $HOME/Nemotron_Challenge:/workspace --bind $SCRATCH:$SCRATCH $SCRATCH/containers/nemotron_vllm_v0200_cu129.sif bash -lc "cd /workspace && python3 scripts/baseline_generate.py --config configs/eval_kaggle_base.yaml --output outputs/base_eval_kaggle_compare.jsonl"
 
 apptainer exec --nv --bind $HOME/Nemotron_Challenge:/workspace $SCRATCH/containers/nemotron_vllm_v0200_cu129.sif bash -lc "cd /workspace && python3 scripts/evaluate.py --predictions outputs/base_eval_kaggle_compare.jsonl --score"
+
+Job IDs:
+
+6540448(2026/5/4, train)
+tail -f logs/lora_train_6540448.out
+tail -f logs/lora_train_6540448.err
+tail -f logs/lora_train_6540448.out | grep -E "step|loss"
+
+6547439(2026/5/4, eval)
+tail -f logs/lora_eval_6547439.out
+tail -f logs/lora_eval_6547439.err
