@@ -101,8 +101,18 @@ PROMPT_TEMPLATE = (
 )
 
 
-def fetch_page(offset: int, length: int, max_retries: int = 5) -> list[dict]:
-    """Fetch a page of rows. Backs off on 429 by Retry-After or exponential."""
+def fetch_page(offset: int, length: int, max_retries: int = 8) -> list[dict]:
+    """Fetch a page of rows.
+
+    Retries on:
+      - 429 (rate limit) using Retry-After header if present, else exponential.
+      - 5xx (server errors: 500/502/503/504) -- the HF datasets-server gateway
+        is intermittently flaky; treating these as fatal would crash long
+        scrape runs. Same backoff schedule as 429.
+      - Networking errors (timeouts, connection reset) -- exponential backoff.
+    Other 4xx errors (400, 404, etc.) are surfaced immediately since they
+    indicate a request bug, not transient infrastructure.
+    """
     qs = urllib.parse.urlencode(
         {
             "dataset": DATASET,
@@ -122,10 +132,14 @@ def fetch_page(offset: int, length: int, max_retries: int = 5) -> list[dict]:
                 payload = json.load(resp)
             return [entry["row"] for entry in payload["rows"]]
         except urllib.error.HTTPError as exc:
-            if exc.code == 429:
+            transient = exc.code == 429 or 500 <= exc.code < 600
+            if transient and attempt + 1 < max_retries:
                 ra = exc.headers.get("Retry-After")
                 wait = float(ra) if ra and ra.isdigit() else delay
-                print(f"[warn] 429 at offset={offset}; sleeping {wait:.0f}s (attempt {attempt + 1}/{max_retries})")
+                print(
+                    f"[warn] HTTP {exc.code} at offset={offset}; "
+                    f"sleeping {wait:.0f}s (attempt {attempt + 1}/{max_retries})"
+                )
                 time.sleep(wait)
                 delay = min(delay * 2, 120.0)
                 continue
@@ -349,4 +363,10 @@ if __name__ == "__main__":
     main()
 
 
-#C:/Users/usp78/AppData/Local/Programs/Python/Python311/python.exe c:/Users/usp78/Desktop/Nemotron_Challenge/Nemotron_Challenge/scripts/prepare_reasoning_traces.py --num 3000 --shortest-of 6000
+#python scripts/prepare_reasoning_traces.py --num 1500 --min-trace-chars 3000 --max-trace-chars 6000 --shortest-of 3000 --output data/lora_short.jsonl
+
+#python scripts/prepare_reasoning_traces.py --num 1500 --min-trace-chars 9000 --max-trace-chars 15000 --output data/lora_medium.jsonl
+
+#cat data/lora_short.jsonl data/lora_medium.jsonl > data/lora_traces.jsonl
+
+#wc -l data/lora_traces.jsonl
