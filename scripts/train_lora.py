@@ -80,13 +80,22 @@ def build_dataset(records: list[dict], tokenizer, max_seq_len: int, mask_user_lo
     skipped = 0
     for rec in records:
         messages = rec["messages"]
+        # enable_thinking=True must match scripts/baseline_generate.py and
+        # the Kaggle submission notebook -- both render the prompt with the
+        # `<think>\n` prefix appended to the assistant turn. Training without
+        # this flag placed our trace at a position the inference distribution
+        # never sees (immediately after `<|assistant|>`), so the LoRA learned
+        # nothing useful for the post-`</think>` answer slot. See iteration-3
+        # post-mortem: 6/200 LoRA accuracy because of this single mismatch.
         full_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False
+            messages, tokenize=False, add_generation_prompt=False,
+            enable_thinking=True,
         )
         prompt_only_text = tokenizer.apply_chat_template(
             [m for m in messages if m["role"] != "assistant"],
             tokenize=False,
             add_generation_prompt=True,
+            enable_thinking=True,
         )
 
         full = tokenizer(full_text, add_special_tokens=False, truncation=True, max_length=max_seq_len)

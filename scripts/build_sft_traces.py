@@ -51,6 +51,32 @@ def extract_boxed(text: str) -> str:
     return matches[-1].strip()
 
 
+def restructure_for_thinking(trace: str, answer: str) -> str:
+    """Reshape a trace as the *post-`<think>`* portion of an assistant turn.
+
+    Nemotron 3 Nano's chat template, with ``enable_thinking=True``, ends
+    the prompt prefix in ``<think>\\n``. The assistant content therefore
+    begins *inside* the thinking block. We strip the reasoner's trailing
+    ``"The answer in \\boxed{} is \\boxed{X}"`` carrier (it's a verification
+    artifact, not part of the reasoning), close the block, and emit the
+    final answer once on its own line:
+
+        <reasoning body>
+        </think>
+
+        \\boxed{<answer>}
+
+    This matches the natural Nemotron output shape, so the SFT loss is
+    applied at exactly the position the inference distribution writes
+    the answer.
+    """
+    lines = trace.splitlines()
+    while lines and ("\\boxed{" in lines[-1] or not lines[-1].strip()):
+        lines.pop()
+    body = "\n".join(lines).rstrip()
+    return f"{body}\n</think>\n\n\\boxed{{{answer}}}"
+
+
 def compare_answer(stored: str, predicted: str) -> bool:
     stored = stored.strip()
     predicted = predicted.strip()
@@ -76,6 +102,13 @@ def main() -> None:
     ap.add_argument("--only-category", default=None,
                     help="If set, process only this category")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--no-thinking-wrap",
+        action="store_true",
+        help="Emit the raw trace verbatim (legacy shape). Default wraps "
+             "the trace as the post-`<think>` portion of the assistant turn, "
+             "matching Nemotron's enable_thinking=True chat template.",
+    )
     args = ap.parse_args()
 
     rows: list[dict] = []
@@ -160,10 +193,14 @@ def main() -> None:
             if not compare_answer(problem.answer, answer):
                 cat_wrong += 1
                 continue
+            content = (
+                trace if args.no_thinking_wrap
+                else restructure_for_thinking(trace, answer)
+            )
             train_records.append({
                 "messages": [
                     {"role": "user", "content": r["prompt"]},
-                    {"role": "assistant", "content": trace},
+                    {"role": "assistant", "content": content},
                 ]
             })
             cat_found += 1
