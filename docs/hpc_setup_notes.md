@@ -177,8 +177,8 @@ apptainer exec --nv $SCRATCH/containers/nemotron_vllm.sif \
 ```
 # baseline log check
 ls -lt logs/ | head
-cat logs/nemotron_baseline_6382411.out
-cat logs/nemotron_baseline_6382411.err
+cat logs/lora_eval_6575153.out
+cat logs/lora_eval_6575153.err
 
 Useful while waiting:
 
