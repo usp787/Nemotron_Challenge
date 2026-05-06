@@ -5,33 +5,40 @@ failures, latency stats, response length, and a count of common failure
 types.
 
 With ``--score``, additionally extracts the final ``\\boxed{...}``
-answer from each response and compares it to ``expected_answer`` as a
-whitespace-stripped string-equality check. Uses the "last \\boxed{}
-wins" convention since reasoning traces often write several boxed
-expressions during the chain-of-thought and only the last one is the
-final answer.
+answer from each response and compares it to ``expected_answer`` using
+the same rule as the official Kaggle metric (with the binary-strict
+addition the author uses in their reasoning.py):
 
-Scoring matches the Kaggle eval contract: exact-string-match against
-ground truth (the host applies relative numerical tolerance for
-numerical answers; a local exact-string check is a strict lower bound).
+  - If the stored answer is a pure binary string (``[01]+``):
+      exact lowercase compare.
+  - Else if both sides parse as floats:
+      ``math.isclose(rel_tol=1e-2, abs_tol=1e-5)`` (1% tolerance).
+  - Else: case-insensitive string compare.
+
+Uses the "last \\boxed{} wins" convention since reasoning traces often
+write several boxed expressions during the chain-of-thought and only
+the last one is the final answer.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import statistics
 
 
 _BOXED_RE = re.compile(r"\\boxed\{")
+_BOXED_REGEX = re.compile(r"\\boxed\{([^}]*)(?:\}|$)")
 
 
 def extract_boxed(text: str | None) -> str | None:
     """Return the inner content of the LAST ``\\boxed{...}`` in text.
 
-    Walks braces by hand instead of using a regex so nested ``{}``
-    inside the boxed expression (e.g. ``\\boxed{\\frac{1}{2}}``) parse
-    correctly. Returns ``None`` if no balanced ``\\boxed{}`` is found.
+    Walks braces by hand so nested ``{}`` inside the boxed expression
+    parse correctly. Falls back to a regex (matching the Kaggle metric
+    exactly) if no balanced ``\\boxed{...}`` is found -- this handles
+    truncated traces that end mid-box.
     """
     if not text:
         return None
@@ -50,19 +57,34 @@ def extract_boxed(text: str | None) -> str | None:
             if depth == 0:
                 return text[start:i]
         i += 1
+    # Truncated \boxed{ at end of text -- mirror the Kaggle regex.
+    rx_matches = _BOXED_REGEX.findall(text)
+    if rx_matches:
+        non_empty = [m.strip() for m in rx_matches if m.strip()]
+        if non_empty:
+            return non_empty[-1]
+        return rx_matches[-1].strip()
     return None
 
 
-def normalize(s: str) -> str:
-    """Strip whitespace; preserve case (Kaggle answers are case-sensitive
-    in form -- e.g. binary strings, decoded English, Roman numerals)."""
-    return s.strip()
+def compare_answer(stored: str, predicted: str) -> bool:
+    """Mirror Kaggle's official metric (with binary-strict guard)."""
+    stored = stored.strip()
+    predicted = predicted.strip()
+    if re.fullmatch(r"[01]+", stored):
+        return predicted.lower() == stored.lower()
+    try:
+        return math.isclose(
+            float(stored), float(predicted), rel_tol=1e-2, abs_tol=1e-5
+        )
+    except Exception:
+        return predicted.lower() == stored.lower()
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--predictions", required=True, help="Path to predictions JSONL")
-    ap.add_argument("--score", action="store_true", help="Run \\boxed{} string-match scoring")
+    ap.add_argument("--score", action="store_true", help="Run \\boxed{} match scoring")
     args = ap.parse_args()
 
     records: list[dict] = []
@@ -114,7 +136,7 @@ def main() -> None:
         if boxed is None:
             no_boxed += 1
             continue
-        if normalize(boxed) == normalize(str(expected)):
+        if compare_answer(str(expected), boxed):
             correct += 1
         else:
             wrong += 1

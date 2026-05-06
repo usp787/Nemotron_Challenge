@@ -69,12 +69,12 @@ mkdir -p $PROJECT_DIR/outputs $PROJECT_DIR/logs
 
 echo ""
 echo "=== Stage 1: Prerequisites check ==="
-test -f $PROJECT_DIR/data/sft_train.jsonl || {
-    echo "FAIL: data/sft_train.jsonl missing — run scripts/prepare_kaggle_sft.py on the login node first."
+test -f $PROJECT_DIR/data/sft_traces.jsonl || {
+    echo "FAIL: data/sft_traces.jsonl missing — run scripts/categorize.py + scripts/build_sft_traces.py on the local box first."
     exit 1
 }
-test -f $PROJECT_DIR/data/sft_holdout.jsonl || {
-    echo "FAIL: data/sft_holdout.jsonl missing — run scripts/prepare_kaggle_sft.py on the login node first."
+test -f $PROJECT_DIR/data/numeral_holdout.jsonl || {
+    echo "FAIL: data/numeral_holdout.jsonl missing — run scripts/build_sft_traces.py on the local box first."
     exit 1
 }
 test -f $TRAIN_CONTAINER || {
@@ -91,7 +91,7 @@ test -d $LORA_PIP_DIR/peft || {
     echo "FAIL: peft not installed at $LORA_PIP_DIR — see docs/lora_strategy.md, 'Setup'"
     exit 1
 }
-wc -l $PROJECT_DIR/data/sft_train.jsonl $PROJECT_DIR/data/sft_holdout.jsonl
+wc -l $PROJECT_DIR/data/sft_traces.jsonl $PROJECT_DIR/data/numeral_holdout.jsonl
 
 # mamba-ssm + causal-conv1d must be present in $LORA_PIP_DIR and ABI-matched
 # to the container's torch. Nemotron-H's trust_remote_code modeling code does

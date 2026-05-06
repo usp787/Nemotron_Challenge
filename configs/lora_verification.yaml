@@ -44,7 +44,7 @@ lora:
   task_type: CAUSAL_LM
 
 data:
-  input_path: data/sft_train.jsonl
+  input_path: data/sft_traces.jsonl
   # Matches the Kaggle eval context window (8192). Pair this with a
   # max_trace_chars cap on the data-prep side so every assistant turn fits
   # end-to-end with the closing \boxed{} included in the loss target.

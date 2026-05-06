@@ -59,8 +59,8 @@ mkdir -p $PROJECT_DIR/outputs $PROJECT_DIR/logs
 
 echo ""
 echo "=== Stage 1: Prerequisites check ==="
-test -f $PROJECT_DIR/data/sft_train.jsonl || {
-    echo "FAIL: data/sft_train.jsonl missing -- run scripts/prepare_kaggle_sft.py first."
+test -f $PROJECT_DIR/data/sft_traces.jsonl || {
+    echo "FAIL: data/sft_traces.jsonl missing -- run scripts/categorize.py + scripts/build_sft_traces.py on the local box first."
     exit 1
 }
 test -f $TRAIN_CONTAINER || {
@@ -81,7 +81,7 @@ test -d $LORA_PIP_DIR/causal_conv1d || {
     echo "FAIL: causal_conv1d missing -- rebuild per docs/lora_strategy.md section 3."
     exit 1
 }
-wc -l $PROJECT_DIR/data/sft_train.jsonl
+wc -l $PROJECT_DIR/data/sft_traces.jsonl
 echo "Training config: $TRAIN_CONFIG"
 
 echo ""

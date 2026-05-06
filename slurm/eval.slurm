@@ -64,8 +64,8 @@ test -f "$ADAPTER_DIR/adapter_config.json" || {
     echo "FAIL: adapter_config.json missing -- adapter is incomplete."
     exit 1
 }
-test -f data/sft_holdout.jsonl || {
-    echo "FAIL: data/sft_holdout.jsonl missing -- run scripts/prepare_kaggle_sft.py first."
+test -f data/numeral_holdout.jsonl || {
+    echo "FAIL: data/numeral_holdout.jsonl missing -- run scripts/categorize.py + scripts/build_sft_traces.py on the local box first."
     exit 1
 }
 ls -lh "$ADAPTER_DIR"
