@@ -52,29 +52,33 @@ def extract_boxed(text: str) -> str:
 
 
 def restructure_for_thinking(trace: str, answer: str) -> str:
-    """Reshape a trace as the *post-`<think>`* portion of an assistant turn.
+    """Reshape a trace as a complete `<think>...</think>\\boxed{}` assistant turn.
 
-    Nemotron 3 Nano's chat template, with ``enable_thinking=True``, ends
-    the prompt prefix in ``<think>\\n``. The assistant content therefore
-    begins *inside* the thinking block. We strip the reasoner's trailing
-    ``"The answer in \\boxed{} is \\boxed{X}"`` carrier (it's a verification
-    artifact, not part of the reasoning), close the block, and emit the
-    final answer once on its own line:
+    Nemotron 3 Nano's chat template (audited against the live tokenizer
+    config) does *not* auto-prepend ``<think>`` when an assistant message
+    already contains ``</think>`` -- the content emits verbatim. So the
+    SFT data itself has to include the opening tag, otherwise the
+    full-text render and the inference prompt prefix don't share a
+    common prefix and ``train_lora.py``'s prompt-length-boundary mask
+    points at the wrong token index.
 
+    Resulting assistant content:
+
+        <think>
         <reasoning body>
         </think>
 
         \\boxed{<answer>}
 
-    This matches the natural Nemotron output shape, so the SFT loss is
-    applied at exactly the position the inference distribution writes
-    the answer.
+    With this shape, the inference prompt (which ends in
+    ``<|im_start|>assistant\\n<think>\\n``) is a true prefix of the
+    training render, so masking and supervision align cleanly.
     """
     lines = trace.splitlines()
     while lines and ("\\boxed{" in lines[-1] or not lines[-1].strip()):
         lines.pop()
     body = "\n".join(lines).rstrip()
-    return f"{body}\n</think>\n\n\\boxed{{{answer}}}"
+    return f"<think>\n{body}\n</think>\n\n\\boxed{{{answer}}}"
 
 
 def compare_answer(stored: str, predicted: str) -> bool:
