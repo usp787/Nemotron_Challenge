@@ -716,8 +716,6 @@ Without `PYTHONNOUSERSITE=1`, `~/.local`'s torch 2.10.0+cu128 is loaded instead.
 - Iteration 3 data prep in flight (short bin scrape was the one that hit the 502; restarted with the patched fetch_page). Once both bins land and concatenate, submit `sbatch slurm/train.slurm` and watch live: `tail -f logs/lora_train_6554862.out` train_id:6554862(2026/5/4). Pass criterion is windowed-mean loss dropping below iteration 2's 0.28 floor; if it doesn't, the longer traces are being predicted from memorization (Nemotron-3 was post-trained on OpenMathReasoning, per [scripts/prepare_reasoning_traces.py](scripts/prepare_reasoning_traces.py) docstring) and iteration 4 will need a different data source.
 - Eval pass criterion: `finish_reason='length'` count drops from 18/30 toward <12/30. Accuracy is downstream of truncation rate; the load-bearing mechanism number is the cap-rate, not the headline accuracy delta.
 
-
-6570209
-
-
-6588021
+[2026-05-06 algo-CoT milestone (Kaggle 0.53)](milestone_2026-05-06.md) — first end-to-end LoRA submission; numeral/gravity/unit_conversion at 100%, cipher ~38%, bit_manipulation/equation_numeric uncovered.
+- [Open research question — non-algo categories](project_open_categories.md) — bit_manipulation + equation_numeric remain; reference solver `bit_manipulation.py` exists at repo root, equation_numeric needs fresh design.
+- [Cluster workflow — submit train and eval slurm separately](feedback_cluster_workflow.md) — do not chain via --dependency; inspect training output before kicking off eval.
