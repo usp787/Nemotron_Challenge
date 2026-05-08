@@ -70,13 +70,13 @@ def build_dataset(records: list[dict], tokenizer, max_seq_len: int, mask_user_lo
     mask_user_loss is true. This is the standard way to do SFT-on-
     assistant-only with HF tokenizers and avoids the chat-template-
     parsing fragility of the alternatives.
+
+    Returns a list of dicts (unpadded). Padding happens per-batch in the
+    collate_fn so step compute scales with the actual batch length, not
+    the global max — important when raising max_seq_len from 4096 to
+    8192 would otherwise pin every step at the worst-case length.
     """
-    import torch
-
-    inputs_ids: list[list[int]] = []
-    labels: list[list[int]] = []
-    attn: list[list[int]] = []
-
+    samples: list[dict] = []
     skipped = 0
     for rec in records:
         messages = rec["messages"]
@@ -113,28 +113,101 @@ def build_dataset(records: list[dict], tokenizer, max_seq_len: int, mask_user_lo
             for i in range(prompt_len):
                 lbl[i] = -100
 
-        inputs_ids.append(full_ids)
-        labels.append(lbl)
-        attn.append(full["attention_mask"])
+        samples.append({
+            "input_ids": full_ids,
+            "labels": lbl,
+            "attention_mask": full["attention_mask"],
+            "length": len(full_ids),
+        })
 
     if skipped:
         print(f"[warn] skipped {skipped} samples whose prompt filled the full context")
 
-    pad_id = tokenizer.pad_token_id
-    if pad_id is None:
-        pad_id = tokenizer.eos_token_id
+    return samples
 
-    max_len = max(len(x) for x in inputs_ids)
 
-    def pad(seq: list[int], fill: int) -> list[int]:
-        return seq + [fill] * (max_len - len(seq))
+class ListDataset:
+    """Tiny dataset wrapper so DataLoader can index into the sample list."""
 
-    input_tensor = torch.tensor([pad(x, pad_id) for x in inputs_ids], dtype=torch.long)
-    label_tensor = torch.tensor([pad(x, -100) for x in labels], dtype=torch.long)
-    attn_tensor = torch.tensor([pad(x, 0) for x in attn], dtype=torch.long)
+    def __init__(self, samples: list[dict]):
+        self.samples = samples
 
-    from torch.utils.data import TensorDataset
-    return TensorDataset(input_tensor, attn_tensor, label_tensor)
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> dict:
+        return self.samples[idx]
+
+
+def make_collate_fn(pad_id: int):
+    """Pad to the longest sample *in this batch*, not the global max.
+
+    With per_device_batch_size=1 this means each step processes exactly the
+    sample's own length — at max_seq_len=8192, short traces no longer pay
+    the worst-case forward/backward cost. Padding tokens still incur
+    compute on Mamba/MoE paths, so reducing them is the cheapest win.
+    """
+    import torch
+
+    def collate(batch: list[dict]):
+        max_len = max(s["length"] for s in batch)
+
+        def pad(seq: list[int], fill: int) -> list[int]:
+            return seq + [fill] * (max_len - len(seq))
+
+        input_ids = torch.tensor([pad(s["input_ids"], pad_id) for s in batch], dtype=torch.long)
+        labels = torch.tensor([pad(s["labels"], -100) for s in batch], dtype=torch.long)
+        attn = torch.tensor([pad(s["attention_mask"], 0) for s in batch], dtype=torch.long)
+        return input_ids, attn, labels
+
+    return collate
+
+
+def _make_length_bucketed_sampler(lengths: list[int], batch_size: int, seed: int):
+    """Group similar-length samples into the same batch.
+
+    Sort the dataset by length, chunk into mega-batches of size
+    bucket_size*batch_size, shuffle inside each chunk, then yield
+    individual indices. Output order is approximately sorted but with
+    enough randomness that consecutive epochs don't see identical
+    micro-batches. No-op at batch_size=1 in terms of padding waste, but
+    keeps gradient noise comparable to plain shuffling at larger bs.
+
+    Built lazily so we can subclass torch.utils.data.Sampler at call time
+    (avoiding a top-level torch import for the small helpers above).
+    """
+    from torch.utils.data import Sampler
+
+    class LengthBucketedSampler(Sampler):
+        def __init__(self, lengths, batch_size, bucket_size=32, seed=0):
+            super().__init__(data_source=None)
+            self.lengths = lengths
+            self.batch_size = batch_size
+            self.bucket_size = bucket_size
+            self.seed = seed
+            self.epoch = 0
+
+        def set_epoch(self, epoch):
+            self.epoch = epoch
+
+        def __len__(self):
+            return len(self.lengths)
+
+        def __iter__(self):
+            import random
+
+            rng = random.Random(self.seed + self.epoch)
+            order = sorted(range(len(self.lengths)), key=lambda i: self.lengths[i])
+            chunk = self.batch_size * self.bucket_size
+            chunks = [order[i : i + chunk] for i in range(0, len(order), chunk)]
+            for c in chunks:
+                rng.shuffle(c)
+            rng.shuffle(chunks)
+            for c in chunks:
+                for i in c:
+                    yield i
+
+    return LengthBucketedSampler(lengths, batch_size, seed=seed)
 
 
 def main() -> None:
@@ -169,13 +242,20 @@ def main() -> None:
     records = read_jsonl(data_cfg["input_path"])
     print(f"[info] {len(records)} training samples")
 
-    dataset = build_dataset(
+    samples = build_dataset(
         records,
         tokenizer,
         max_seq_len=data_cfg.get("max_seq_len", 4096),
         mask_user_loss=data_cfg.get("mask_user_loss", True),
     )
+    dataset = ListDataset(samples)
     print(f"[info] tokenized dataset size: {len(dataset)}")
+    lengths = [s["length"] for s in samples]
+    if lengths:
+        lengths_sorted = sorted(lengths)
+        p50 = lengths_sorted[len(lengths_sorted) // 2]
+        p90 = lengths_sorted[int(0.9 * (len(lengths_sorted) - 1))]
+        print(f"[info] sample length tokens: p50={p50} p90={p90} max={lengths_sorted[-1]}")
 
     print(f"[info] loading base model in bf16 (this can take a few minutes)")
     dtype = torch.bfloat16 if model_cfg.get("dtype", "bfloat16") == "bfloat16" else torch.float16
@@ -208,25 +288,49 @@ def main() -> None:
     seed = int(train_cfg.get("seed", 42))
     torch.manual_seed(seed)
 
-    loader = DataLoader(dataset, batch_size=bs, shuffle=True, drop_last=False)
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = tokenizer.eos_token_id
+
+    sampler = _make_length_bucketed_sampler(lengths, batch_size=bs, seed=seed)
+    loader = DataLoader(
+        dataset,
+        batch_size=bs,
+        sampler=sampler,
+        drop_last=False,
+        collate_fn=make_collate_fn(pad_id),
+    )
     steps_per_epoch = max(1, len(loader) // grad_accum)
-    total_steps = steps_per_epoch * n_epochs
-    warmup_steps = max(1, int(total_steps * float(train_cfg.get("warmup_ratio", 0.03))))
+    total_steps_full = steps_per_epoch * n_epochs
+    # max_steps caps the optimizer-step count. Iteration N hit loss<0.01
+    # by step 285 of 421, so the tail is overfit churn that also blew the
+    # 5h SLURM walltime. The cosine schedule still spans total_steps_full
+    # so the LR shape matches what we'd get without the cap.
+    max_steps_cfg = int(train_cfg.get("max_steps", 0) or 0)
+    total_steps = min(total_steps_full, max_steps_cfg) if max_steps_cfg > 0 else total_steps_full
+    warmup_steps = max(1, int(total_steps_full * float(train_cfg.get("warmup_ratio", 0.03))))
 
     optim = torch.optim.AdamW(
         (p for p in model.parameters() if p.requires_grad),
         lr=lr,
         weight_decay=float(train_cfg.get("weight_decay", 0.0)),
     )
-    sched = get_cosine_schedule_with_warmup(optim, warmup_steps, total_steps)
+    sched = get_cosine_schedule_with_warmup(optim, warmup_steps, total_steps_full)
 
     log_every = int(train_cfg.get("logging_steps", 5))
     model.train()
     global_step = 0
     optim.zero_grad()
-    print(f"[info] training: total_optim_steps={total_steps} warmup={warmup_steps}")
+    print(
+        f"[info] training: total_optim_steps={total_steps} "
+        f"(uncapped={total_steps_full}, max_steps={max_steps_cfg or 'none'}) warmup={warmup_steps}"
+    )
 
+    stop = False
     for epoch in range(n_epochs):
+        if stop:
+            break
+        sampler.set_epoch(epoch)
         for micro_step, (input_ids, attn_mask, labels) in enumerate(loader):
             input_ids = input_ids.to(model.device)
             attn_mask = attn_mask.to(model.device)
@@ -246,9 +350,13 @@ def main() -> None:
                         f"[step {global_step}/{total_steps}] "
                         f"loss={(loss.item() * grad_accum):.4f} lr={sched.get_last_lr()[0]:.2e}"
                     )
+                if max_steps_cfg > 0 and global_step >= max_steps_cfg:
+                    print(f"[info] hit max_steps={max_steps_cfg}, stopping early")
+                    stop = True
+                    break
 
         # tail: flush any remaining grad
-        if (micro_step + 1) % grad_accum != 0:
+        if not stop and (micro_step + 1) % grad_accum != 0:
             optim.step()
             sched.step()
             optim.zero_grad()

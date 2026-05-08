@@ -2,8 +2,8 @@
 #SBATCH --job-name=lora_train
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:h200:1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=192G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
 #SBATCH --time=05:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err

@@ -67,6 +67,11 @@ train:
   logging_steps: 5
   save_steps: 0          # adapter is saved once at end; intermediate ckpts off for verification
   seed: 42
+  # Job 6652702 hit loss<0.01 by step 285 of 421 then timed out at the 5h
+  # walltime; the tail was overfit churn. Cap at 300 optimizer steps so the
+  # adapter saves cleanly inside walltime. Cosine LR is still scheduled
+  # against the uncapped total so the curve shape matches the longer run.
+  max_steps: 300
 
 output:
   adapter_dir: outputs/lora_adapter
