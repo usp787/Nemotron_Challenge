@@ -719,3 +719,6 @@ Without `PYTHONNOUSERSITE=1`, `~/.local`'s torch 2.10.0+cu128 is loaded instead.
 [2026-05-06 algo-CoT milestone (Kaggle 0.53)](milestone_2026-05-06.md) — first end-to-end LoRA submission; numeral/gravity/unit_conversion at 100%, cipher ~38%, bit_manipulation/equation_numeric uncovered.
 - [Open research question — non-algo categories](project_open_categories.md) — bit_manipulation + equation_numeric remain; reference solver `bit_manipulation.py` exists at repo root, equation_numeric needs fresh design.
 - [Cluster workflow — submit train and eval slurm separately](feedback_cluster_workflow.md) — do not chain via --dependency; inspect training output before kicking off eval.
+
+
+6652702
