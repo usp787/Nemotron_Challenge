@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
-#SBATCH --time=01:00:00
+#SBATCH --time=02:30:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
@@ -18,9 +18,13 @@
 #   LORA_ADAPTER_DIR=$HOME/Nemotron_Challenge/outputs/lora_adapter_<JOB_ID> \
 #     sbatch slurm/eval.slurm
 #
-# AIME25 has 30 problems; vLLM batches them concurrently, so generation finishes
-# in well under 30 minutes per model. Two model loads + two evals + scoring
-# fit in 1h with margin (cache warm).
+# 2026-05-08: walltime bumped 1h -> 2:30 after job 6673063 timed out at 1h on
+# the 600-prompt stratified holdout. The previous 1h was sized for the
+# 200-prompt single-category numeral_holdout where responses were ~600 chars;
+# the stratified set is 3x the prompts and includes bit_manipulation /
+# equation_numeric / cipher categories where base-model responses can
+# generate to max_tokens=7680 at temp=0. Two model loads + two evals at this
+# scale fit comfortably in 2:30.
 
 set -euo pipefail
 
