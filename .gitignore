@@ -9,6 +9,7 @@ outputs/
 !data/problems_classified.jsonl
 !data/sft_traces.jsonl
 !data/numeral_holdout.jsonl
+!data/stratified_holdout.jsonl
 
 # LoRA training artifacts
 outputs/lora_adapter*/
