@@ -125,6 +125,7 @@ def main() -> None:
                 "prompt": item.get("prompt"),
                 "formatted_prompt": formatted_prompt,
                 "expected_answer": item.get("expected_answer"),
+                "category": item.get("category"),
                 "response": None,
                 "latency_sec": None,
                 "finish_reason": None,

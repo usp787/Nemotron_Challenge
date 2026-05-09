@@ -64,8 +64,8 @@ test -f "$ADAPTER_DIR/adapter_config.json" || {
     echo "FAIL: adapter_config.json missing -- adapter is incomplete."
     exit 1
 }
-test -f data/numeral_holdout.jsonl || {
-    echo "FAIL: data/numeral_holdout.jsonl missing -- run scripts/categorize.py + scripts/build_sft_traces.py on the local box first."
+test -f data/stratified_holdout.jsonl || {
+    echo "FAIL: data/stratified_holdout.jsonl missing -- run scripts/build_stratified_holdout.py on the local box first (after scripts/categorize.py)."
     exit 1
 }
 ls -lh "$ADAPTER_DIR"
@@ -117,10 +117,10 @@ apptainer exec \
   bash -lc "
     cd /workspace
     echo '--- Base model (LoRA disabled) ---'
-    python3 scripts/evaluate.py --predictions $BASE_OUTPUT --score
+    python3 scripts/evaluate.py --predictions $BASE_OUTPUT --score --by-category
     echo ''
     echo '--- LoRA-adapted model ---'
-    python3 scripts/evaluate.py --predictions $LORA_OUTPUT --score
+    python3 scripts/evaluate.py --predictions $LORA_OUTPUT --score --by-category
   "
 
 echo ""

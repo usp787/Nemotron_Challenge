@@ -28,11 +28,13 @@ runtime:
     max_loras: 1
 
 data:
-  # Use a held-out reasoning set for verification scoring. AIME25 is a
-  # reasonable proxy until the Kaggle test set distribution is better
-  # understood; swap input_path to any boxed-answer JSONL with
-  # expected_answer fields.
-  input_path: data/numeral_holdout.jsonl
+  # Stratified holdout across all 6 Kaggle categories (~100 per category,
+  # excluding any prompt used in data/sft_traces.jsonl). Built by
+  # scripts/build_stratified_holdout.py. Replaces the single-category
+  # numeral_holdout.jsonl which scored 100% locally regardless of training
+  # config and gave no signal on cipher / bit_manipulation /
+  # equation_numeric — see memory:feedback_holdout_must_be_stratified.
+  input_path: data/stratified_holdout.jsonl
   output_dir: outputs
 
 logging:

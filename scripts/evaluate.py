@@ -85,6 +85,10 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--predictions", required=True, help="Path to predictions JSONL")
     ap.add_argument("--score", action="store_true", help="Run \\boxed{} match scoring")
+    ap.add_argument("--by-category", action="store_true",
+                    help="With --score, additionally print per-category accuracy. Requires "
+                         "predictions to carry a 'category' field (set by baseline_generate.py "
+                         "from the input prompts file).")
     args = ap.parse_args()
 
     records: list[dict] = []
@@ -149,6 +153,36 @@ def main() -> None:
     print(f"No \\boxed{{}}:          {no_boxed}")
     if scored > 0:
         print(f"Accuracy:                {correct / scored:.3f}")
+
+    if args.by_category:
+        from collections import defaultdict
+
+        per_cat: dict[str, dict[str, int]] = defaultdict(
+            lambda: {"correct": 0, "wrong": 0, "no_boxed": 0}
+        )
+        for r in records:
+            expected = r.get("expected_answer")
+            if expected is None:
+                continue
+            cat = r.get("category") or "unknown"
+            boxed = extract_boxed(r.get("response"))
+            bucket = per_cat[cat]
+            if boxed is None:
+                bucket["no_boxed"] += 1
+            elif compare_answer(str(expected), boxed):
+                bucket["correct"] += 1
+            else:
+                bucket["wrong"] += 1
+
+        print()
+        print("Per-category accuracy:")
+        header = f"  {'category':<20}{'n':>6}{'correct':>10}{'wrong':>8}{'no_boxed':>11}{'acc':>9}"
+        print(header)
+        for c in sorted(per_cat):
+            b = per_cat[c]
+            n = b["correct"] + b["wrong"] + b["no_boxed"]
+            acc = b["correct"] / n if n else 0.0
+            print(f"  {c:<20}{n:>6}{b['correct']:>10}{b['wrong']:>8}{b['no_boxed']:>11}{acc:>9.3f}")
 
 
 if __name__ == "__main__":
