@@ -1,63 +1,75 @@
-"""Reasoning generator for the ``unit_conversion`` category.
+"""Unit conversion: output = factor * input reasoning generator."""
 
-Task: 5 examples of ``X m becomes Y``. Across all training/holdout
-problems audited, the transformation is a single multiplicative
-factor (y = k * x); per-example ratios agree to 4+ decimal places,
-so a simple mean-of-ratios estimate stays well inside the 1e-2
-relative tolerance of the eval metric.
-
-Trace shape: list each ratio, average, apply to the target value,
-round to 2 decimal places (matching the dataset's answer format).
-"""
 from __future__ import annotations
 
-import re
-from typing import Optional
-
-from .store_types import Problem
-
-
-_BECOMES_RE = re.compile(r"\s*([\-\d\.]+)\s*\S+\s+becomes\s+([\-\d\.]+)\s*$")
-_QUESTION_RE = re.compile(
-    r"Now, convert the following measurement:\s*([\-\d\.]+)"
+from .store_types import (
+    Problem,
+    cast_dp_pair,
+    long_division_lines,
+    long_multiplication_lines,
+    truncate_3dp,
 )
 
 
-def reasoning_unit_conversion(problem: Problem) -> Optional[str]:
-    pairs: list[tuple[float, float]] = []
-    for line in problem.prompt.splitlines():
-        m = _BECOMES_RE.match(line)
-        if m:
-            pairs.append((float(m.group(1)), float(m.group(2))))
-    qm = _QUESTION_RE.search(problem.prompt)
-    if not qm or len(pairs) < 2:
-        return None
-    target = float(qm.group(1))
-
-    ratios = [y / x for x, y in pairs if x != 0]
-    if not ratios:
-        return None
-    k = sum(ratios) / len(ratios)
-    answer = k * target
-    rounded = round(answer, 2)
-
+def reasoning_unit_conversion(problem: Problem) -> str | None:
     lines: list[str] = []
     lines.append(
-        "The Wonderland conversion is linear in the input: y = k * x. "
-        "Recover k from each example as y / x, then average."
+        "We need to find a conversion rule that maps the inputs to outputs. "
+        "Let me check if it's a linear factor."
     )
+    lines.append("I will put my final answer inside \\boxed{}.")
     lines.append("")
-    lines.append("Per-example ratios:")
-    for x, y in pairs:
-        lines.append(f"  {y} / {x} = {y / x:.6f}")
+    factor_strs: list[str] = []
+    for ex in problem.examples:
+        inp = float(ex.input_value)
+        if inp != 0:
+            out_str = truncate_3dp(ex.output_value)
+            inp_str = truncate_3dp(ex.input_value)
+            lines.append(f"{ex.input_value} -> {ex.output_value}")
+            inp_cast, out_cast, inp_dp, out_dp = cast_dp_pair(inp_str, out_str)
+            lines.append(
+                f"Casting input to {inp_dp} decimal places, "
+                f"output to {out_dp} decimal places: "
+                f"{inp_cast} -> {out_cast}"
+            )
+            lines.append(f"factor = {out_cast} / {inp_cast}")
+            div_lines, factor_str = long_division_lines(out_cast, inp_cast)
+            lines.extend(div_lines)
+            lines.append(f"= {factor_str}")
+            factor_strs.append(factor_str)
+            lines.append("")
+
+    if not factor_strs:
+        return None
+
+    factors = [float(s) for s in factor_strs]
+
+    # List factor values and pick median (for even count, use the smaller middle value)
+    f_list_str = ", ".join(factor_strs)
+    lines.append(f"factor values: {f_list_str}")
+    paired = sorted(zip(factors, factor_strs))
+    sorted_str = ", ".join(s for _, s in paired)
+    lines.append(f"factor values (sorted): {sorted_str}")
+    if len(paired) % 2 == 0 and len(paired) >= 2:
+        _, med_factor_str = paired[len(paired) // 2 - 1]
+    else:
+        mid = len(paired) // 2
+        _, med_factor_str = paired[mid]
+    lines.append(f"The median factor is {med_factor_str}.")
+
+    q_str = problem.question
+    med_display = med_factor_str.rstrip("0").rstrip(".")
     lines.append("")
-    sum_str = " + ".join(f"{r:.6f}" for r in ratios)
-    lines.append(f"k = ({sum_str}) / {len(ratios)} = {k:.6f}")
+    lines.append(f"Converting {q_str}:")
+    lines.append(f"{q_str} * {med_display}:")
+    mult_lines, mult_result = long_multiplication_lines(q_str, med_display)
+    lines.extend(mult_lines)
+    # Truncate to 3 decimal places
+    dot = mult_result.index(".")
+    boxed_answer = mult_result[: dot + 4]
+    lines.append(f"= {boxed_answer}")
+
     lines.append("")
-    lines.append(f"Apply to the target measurement {target}:")
-    lines.append(f"  y = {k:.6f} * {target} = {answer:.6f}")
-    lines.append("")
-    lines.append(f"Round to 2 decimal places: {rounded:.2f}")
-    lines.append("")
-    lines.append(f"The answer in \\boxed{{}} is \\boxed{{{rounded:.2f}}}")
+    lines.append("I will now return the answer in \\boxed{}")
+    lines.append(f"The answer in \\boxed{{–}} is \\boxed{{{boxed_answer}}}")
     return "\n".join(lines)

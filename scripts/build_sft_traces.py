@@ -1,24 +1,45 @@
 """Generate SFT training traces and per-category holdout JSONLs.
 
 Reads ``data/problems_classified.jsonl``, dispatches each problem to
-the matching reasoner, verifies the trace's ``\\boxed{}`` answer
-against ground truth, and writes:
+the matching reasoner, and writes:
 
   data/sft_traces.jsonl              (training, ``messages`` format)
   data/<category>_holdout.jsonl     (per-category eval set, one file each)
 
-Wrong-answer traces are dropped; categories without a registered
-generator skip trace generation but still get a holdout JSONL written
-(so paired base-vs-LoRA eval can run on them once we add the solver).
+Each training record is shaped as::
 
-Mirrors the official Kaggle ``compare_answer`` semantics:
+    {"id", "category", "messages": [{"role": "user", ...},
+                                    {"role": "assistant", ...}]}
+
+The ``id`` + ``category`` fields are always emitted so downstream consumers
+(scripts/build_augmenter_traces.py's matching augmenter, for one) can
+filter to bit_manipulation rows without re-parsing.
+
+Two modes for the assistant target:
+
+  default (baseline)
+    Wrong-answer traces are dropped. The assistant's ``\\boxed{...}`` is
+    rewritten to the *ground truth* answer. Maximises per-trace correctness
+    but discards the reasoner's procedural signal on hard puzzles.
+
+  ``--keep-wrong-traces --use-reasoner-boxed``  (matches THK's 04-10-04-33)
+    Every reasoner output is kept regardless of correctness. The
+    assistant's ``\\boxed{...}`` value is whatever the reasoner itself
+    emitted -- often wrong on cryptarithm and equation_numeric_guess, but
+    the surrounding procedure is still a valid CoT pattern. THK's
+    LB-winning run trains on this superset (~17K records) because the
+    procedure transfers even when the boxed answer doesn't.
+
+Use the ``compare_answer`` rules from the Kaggle metric:
   - pure binary string -> exact lowercase compare
   - else if both float-parseable -> math.isclose(rel_tol=1e-2, abs_tol=1e-5)
   - else -> case-insensitive string compare
 
-Usage:
+Usage (current baseline behaviour):
     python scripts/build_sft_traces.py
-    python scripts/build_sft_traces.py --only-category numeral --holdout 200
+
+Usage (matches THK's full-coverage corpus):
+    python scripts/build_sft_traces.py --keep-wrong-traces --use-reasoner-boxed --holdout 50
 """
 from __future__ import annotations
 
@@ -73,6 +94,10 @@ def restructure_for_thinking(trace: str, answer: str) -> str:
     With this shape, the inference prompt (which ends in
     ``<|im_start|>assistant\\n<think>\\n``) is a true prefix of the
     training render, so masking and supervision align cleanly.
+
+    ``answer`` is the value used in the final ``\\boxed{}``; callers
+    decide whether that's the ground truth (baseline) or the reasoner's
+    own ``\\boxed{}`` value (``--use-reasoner-boxed``, matches THK).
     """
     lines = trace.splitlines()
     while lines and ("\\boxed{" in lines[-1] or not lines[-1].strip()):
@@ -112,6 +137,17 @@ def main() -> None:
         help="Emit the raw trace verbatim (legacy shape). Default wraps "
              "the trace as the post-`<think>` portion of the assistant turn, "
              "matching Nemotron's enable_thinking=True chat template.",
+    )
+    ap.add_argument(
+        "--keep-wrong-traces", action="store_true",
+        help="Keep reasoner traces whose boxed answer does NOT match ground "
+             "truth. Matches THK's 04-10-04-33 behaviour. Default: drop them.",
+    )
+    ap.add_argument(
+        "--use-reasoner-boxed", action="store_true",
+        help="Use the reasoner's own boxed value in the trained \\boxed{...} "
+             "(rather than the ground-truth answer). Matches THK's "
+             "04-10-04-33 behaviour. Default: rewrite to ground truth.",
     )
     args = ap.parse_args()
 
@@ -183,6 +219,7 @@ def main() -> None:
         cat_found = 0
         cat_unknown = 0
         cat_wrong = 0
+        cat_kept_wrong = 0
         for r in train_items:
             problem = build_problem(r)
             try:
@@ -193,30 +230,46 @@ def main() -> None:
             if trace is None:
                 cat_unknown += 1
                 continue
-            answer = extract_boxed(trace)
-            if not compare_answer(problem.answer, answer):
-                cat_wrong += 1
-                continue
+            reasoner_boxed = extract_boxed(trace)
+            is_correct = compare_answer(problem.answer, reasoner_boxed)
+            if not is_correct:
+                if not args.keep_wrong_traces:
+                    cat_wrong += 1
+                    continue
+                cat_kept_wrong += 1
+
+            # Choose what value to put in the trained \boxed{...}.
+            if args.use_reasoner_boxed and reasoner_boxed:
+                boxed_target = reasoner_boxed
+            else:
+                boxed_target = problem.answer
+
             content = (
                 trace if args.no_thinking_wrap
-                else restructure_for_thinking(trace, answer)
+                else restructure_for_thinking(trace, boxed_target)
             )
             train_records.append({
+                "id": r["id"],
+                "category": cat,
                 "messages": [
                     {"role": "user", "content": r["prompt"]},
                     {"role": "assistant", "content": content},
-                ]
+                ],
             })
-            cat_found += 1
+            if is_correct:
+                cat_found += 1
 
         rule_found_total += cat_found
         rule_unknown_total += cat_unknown
         wrong_answer_total += cat_wrong
+        kept_wrong_note = (
+            f", kept_wrong {cat_kept_wrong}" if cat_kept_wrong else ""
+        )
         denom = max(1, len(train_items))
         print(
             f"[{cat}] rule_found {cat_found}/{len(train_items)} "
             f"({100.0 * cat_found / denom:.1f}%); "
-            f"unknown {cat_unknown}, wrong {cat_wrong}"
+            f"unknown {cat_unknown}, wrong {cat_wrong}{kept_wrong_note}"
         )
 
     # Interleave categories so SFT batches see a mix.
@@ -229,10 +282,14 @@ def main() -> None:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     print()
-    print(f"Total training traces: {rule_found_total} -> {out_train}")
+    print(f"Total training records: {len(train_records)} -> {out_train}")
+    print(f"  rule_found (correct boxed): {rule_found_total}")
+    if args.keep_wrong_traces:
+        print(f"  kept-wrong (procedure only): "
+              f"{len(train_records) - rule_found_total}")
     print(f"Skipped (no generator): {no_generator_total}")
-    print(f"Skipped (rule_unknown): {rule_unknown_total}")
-    print(f"Skipped (wrong answer): {wrong_answer_total}")
+    print(f"Skipped (rule_unknown / generator returned None): {rule_unknown_total}")
+    print(f"Skipped (wrong answer, dropped): {wrong_answer_total}")
 
 
 if __name__ == "__main__":

@@ -1,251 +1,381 @@
-"""Reasoning generator for the ``cipher`` category.
+"""Cipher: substitution cipher reasoning generator."""
 
-Each problem is a per-problem monoalphabetic substitution. We:
-
-1. Walk the example pairs word-by-word and letter-by-letter to
-   accumulate the partial substitution table.
-
-2. If every cipher letter in the query is already mapped, decode
-   directly (the original "easy" path).
-
-3. Otherwise, run a constraint-propagation pass against the closed
-   Wonderland vocabulary (77 words, audited from the full classified
-   corpus on 2026-05-07): each query word is matched against every
-   vocabulary word of the same length under the partial mapping. If
-   exactly one vocabulary word fits, the implied letter assignments
-   are added to the mapping (subject to bijectivity), and we iterate.
-   This recovers the under-determined problems that the examples
-   alone could not solve.
-
-4. After propagation, if the query is still incomplete, the trace is
-   abandoned (``return None``) so ``build_sft_traces.py`` drops it
-   rather than emitting a guess.
-"""
 from __future__ import annotations
 
-import re
-from typing import Optional
+from functools import lru_cache
+from pathlib import Path
 
 from .store_types import Problem
 
-
-_QUESTION_RE = re.compile(
-    r"Now, decrypt the following text:\s*(.+?)\s*$", re.MULTILINE
-)
+_WONDERLAND_PATH = Path(__file__).parent / "wonderland.txt"
 
 
-# Closed Wonderland vocabulary. Generated on 2026-05-07 by scanning every
-# cipher problem's plaintext (right-hand side of "->" lines + the answer
-# field) in data/problems_classified.jsonl. 77 unique words, lowercased.
-_VOCAB: tuple[str, ...] = (
-    "above", "alice", "ancient", "around", "beyond", "bird", "book",
-    "bright", "castle", "cat", "cave", "chases", "clever", "colorful",
-    "creates", "crystal", "curious", "dark", "discovers", "door",
-    "dragon", "draws", "dreams", "explores", "follows", "forest",
-    "found", "garden", "golden", "hatter", "hidden", "imagines", "in",
-    "inside", "island", "key", "king", "knight", "library", "magical",
-    "map", "message", "mirror", "mountain", "mouse", "mysterious",
-    "near", "ocean", "palace", "potion", "princess", "puzzle", "queen",
-    "rabbit", "reads", "school", "secret", "sees", "silver", "story",
-    "strange", "student", "studies", "teacher", "the", "through",
-    "tower", "treasure", "turtle", "under", "valley", "village",
-    "watches", "wise", "wizard", "wonderland", "writes",
-)
-_VOCAB_BY_LEN: dict[int, tuple[str, ...]] = {}
-for _w in _VOCAB:
-    _VOCAB_BY_LEN.setdefault(len(_w), [])
-    _VOCAB_BY_LEN[len(_w)].append(_w)
-_VOCAB_BY_LEN = {k: tuple(v) for k, v in _VOCAB_BY_LEN.items()}
+@lru_cache(maxsize=1)
+def _load_wonderland() -> list[str]:
+    """Load the Wonderland word list (sorted)."""
+    with _WONDERLAND_PATH.open() as f:
+        words = [line.strip() for line in f if line.strip()]
+    return sorted(words)
 
 
-def _build_partial_mapping(
-    examples: list[tuple[str, str]],
-) -> Optional[dict[str, str]]:
-    """Walk word-aligned example pairs and accumulate cipher->plain.
+def _word_pattern(word: str) -> tuple[int, ...]:
+    seen: dict[str, int] = {}
+    pattern: list[int] = []
+    for char in word:
+        if char not in seen:
+            seen[char] = len(seen)
+        pattern.append(seen[char])
+    return tuple(pattern)
 
-    Returns ``None`` on any structural inconsistency (word-count or
-    letter-count mismatch, or two example pairs disagreeing on the same
-    cipher letter).
+
+def _candidate_words_for_partial(
+    partial: str,
+    cipher_to_plain: dict[str, str],
+    plain_to_cipher: dict[str, str],
+    cipher_word: str,
+) -> list[str]:
+    """Find wonderland words matching a partial decryption with unknowns.
+
+    Candidates must be consistent with cipher_to_plain (bijective mapping).
     """
-    mapping: dict[str, str] = {}
-    for cipher, plain in examples:
-        cw = cipher.split()
-        pw = plain.split()
-        if len(cw) != len(pw):
-            return None
-        for c_word, p_word in zip(cw, pw):
-            if len(c_word) != len(p_word):
-                return None
-            for c_ch, p_ch in zip(c_word, p_word):
-                if not (c_ch.isalpha() and p_ch.isalpha()):
-                    continue
-                c_ch = c_ch.lower()
-                p_ch = p_ch.lower()
-                if c_ch in mapping and mapping[c_ch] != p_ch:
-                    return None
-                mapping[c_ch] = p_ch
-    return mapping
+    candidates: list[str] = []
+    target_len = len(partial)
+    target_pattern = _word_pattern(cipher_word)
+
+    for word in _load_wonderland():
+        if len(word) != target_len:
+            continue
+        if _word_pattern(word) != target_pattern:
+            continue
+        match = True
+        for i, ch in enumerate(partial):
+            if ch != "?" and ch != word[i]:
+                match = False
+                break
+        if not match:
+            continue
+        # Check forward consistency only (cipher->plain)
+        consistent = True
+        for cc, wc in zip(cipher_word, word):
+            if cc in cipher_to_plain and cipher_to_plain[cc] != wc:
+                consistent = False
+                break
+        if consistent:
+            candidates.append(word)
+
+    candidates.sort()
+    return candidates
 
 
-def _word_candidates(
-    cipher_word: str, mapping: dict[str, str]
-) -> list[tuple[str, dict[str, str]]]:
-    """Vocabulary words that fit ``cipher_word`` under ``mapping``.
-
-    Returns a list of (vocab_word, implied_new_assignments). Bijectivity
-    against the existing mapping is enforced: a cipher letter cannot
-    map to a plain letter that another cipher letter already owns.
-    """
-    cw = cipher_word.lower()
-    if not all(c.isalpha() for c in cw):
-        return []
-    pool = _VOCAB_BY_LEN.get(len(cw), ())
-    used_plain = set(mapping.values())
-
-    out: list[tuple[str, dict[str, str]]] = []
-    for cand in pool:
-        local: dict[str, str] = {}
-        ok = True
-        local_used: set[str] = set()
-        for c_ch, p_ch in zip(cw, cand):
-            if c_ch in mapping:
-                if mapping[c_ch] != p_ch:
-                    ok = False
-                    break
-            elif c_ch in local:
-                if local[c_ch] != p_ch:
-                    ok = False
-                    break
-            else:
-                if p_ch in used_plain or p_ch in local_used:
-                    ok = False
-                    break
-                local[c_ch] = p_ch
-                local_used.add(p_ch)
-        if ok:
-            out.append((cand, local))
-    return out
-
-
-def _propagate(
-    mapping: dict[str, str],
-    query_words: list[str],
-    log: list[str],
-) -> dict[str, str]:
-    """Iterate vocabulary-constraint propagation until fixed point.
-
-    Each round, for every query word with one or more unmapped letters,
-    enumerate vocabulary candidates. If exactly one candidate fits, the
-    implied letter assignments are committed. Stop when no round commits
-    new letters.
-    """
-    mapping = dict(mapping)
-    while True:
-        changed = False
-        for word in query_words:
-            cw = word.lower()
-            if all((not c.isalpha()) or c in mapping for c in cw):
-                continue
-            cands = _word_candidates(cw, mapping)
-            if len(cands) == 1:
-                vocab_word, new_map = cands[0]
-                if new_map:
-                    log.append(
-                        f"  '{word}' uniquely matches '{vocab_word}'; add "
-                        + ", ".join(f"{k}->{v}" for k, v in new_map.items())
-                    )
-                    mapping.update(new_map)
-                    changed = True
-            elif len(cands) > 1:
-                preview = ", ".join(c for c, _ in cands[:5])
-                log.append(
-                    f"  '{word}' has {len(cands)} candidates ({preview}"
-                    + ("..." if len(cands) > 5 else "")
-                    + "); skipping until other words narrow it down."
-                )
-        if not changed:
-            return mapping
-
-
-def reasoning_cipher(problem: Problem) -> Optional[str]:
-    examples: list[tuple[str, str]] = []
-    for line in problem.prompt.splitlines():
-        if " -> " in line:
-            left, _, right = line.partition(" -> ")
-            examples.append((left.strip(), right.strip()))
-    qm = _QUESTION_RE.search(problem.prompt)
-    if not qm or not examples:
-        return None
-    query = qm.group(1).strip()
-
-    mapping = _build_partial_mapping(examples)
-    if mapping is None:
-        return None
-
-    query_words = [w for w in query.split() if w]
-    needs_inference = any(
-        ch.isalpha() and ch.lower() not in mapping for w in query_words for ch in w
-    )
-
-    propagation_log: list[str] = []
-    if needs_inference:
-        before = dict(mapping)
-        mapping = _propagate(mapping, query_words, propagation_log)
-        # If inference resolved nothing useful, propagation_log may still
-        # be empty; that's fine -- we just won't include the section.
-        if mapping == before:
-            propagation_log.append("  (no new letters resolvable from vocabulary)")
-
-    # Final check: every alphabetic letter in the query must be mapped.
-    for ch in query.lower():
-        if ch.isalpha() and ch not in mapping:
-            return None
-
-    decoded = "".join(
-        mapping[ch.lower()] if ch.isalpha() else ch for ch in query
-    )
-
+def reasoning_cipher(problem: Problem) -> str | None:
+    dash = "–"
     lines: list[str] = []
     lines.append(
-        "Each example pairs a ciphertext line with its plaintext. "
-        "Words and letter positions align, so each cipher letter maps "
-        "to exactly one plain letter."
+        "We need to find the encryption mapping from the examples. "
+        "It looks like a substitution cipher."
     )
-    lines.append("")
-    lines.append("Examples:")
-    for cipher, plain in examples:
-        lines.append(f"  {cipher} -> {plain}")
-    lines.append("")
-    lines.append("Walk each pair letter-by-letter to build the substitution table:")
-    for c in sorted(mapping):
-        lines.append(f"  {c} -> {mapping[c]}")
-    lines.append("")
+    lines.append("I will put my final answer inside \\boxed{}.")
 
-    if propagation_log:
-        lines.append(
-            "Some letters in the query are not covered by the examples. "
-            "Resolve them by matching each query word against the closed "
-            "Wonderland vocabulary under the partial table:"
-        )
-        lines.extend(propagation_log)
+    # List all input words (examples + question)
+    lines.append("")
+    lines.append("Listing the input words:")
+    for ex in problem.examples:
+        cipher_words = str(ex.input_value).split()
         lines.append("")
-        lines.append("Updated substitution table:")
-        for c in sorted(mapping):
-            lines.append(f"  {c} -> {mapping[c]}")
+        lines.append(f"【{ex.input_value}】")
+        for j, w in enumerate(cipher_words):
+            lines.append(f"{'' if j == 0 else ' '}{w}")
+    question_words_list = problem.question.split()
+    lines.append("")
+    lines.append(f"【 {problem.question}】")
+    for w in question_words_list:
+        lines.append(f" {w}")
+
+    # Break down into characters (examples + question)
+    lines.append("")
+    lines.append("Breaking down into characters:")
+    for ex in problem.examples:
+        lines.append("")
+        lines.append(f"【{ex.input_value}】")
+        for w in str(ex.input_value).split():
+            lines.append(f"{dash.join(w)}")
+    lines.append("")
+    lines.append(f"【 {problem.question}】")
+    for w in question_words_list:
+        lines.append(f"{dash.join(w)}")
+
+    wonderland_words = _load_wonderland()
+
+    cipher_to_plain: dict[str, str] = {}
+    for ex in problem.examples:
+        cipher_words = str(ex.input_value).split()
+        plain_words = str(ex.output_value).split()
+        if len(cipher_words) != len(plain_words):
+            continue
+
+        lines.append("")
+        lines.append("")
+        plain_quoted = " ".join(f"【{w}】" for w in plain_words)
+        lines.append(f"【{ex.input_value}】 -> 【{ex.output_value}】 / {plain_quoted}:")
         lines.append("")
 
-    lines.append(f"Apply the table to the query: '{query}'")
-    per_char: list[str] = []
-    for ch in query:
-        if ch.isalpha():
-            per_char.append(f"{ch}->{mapping[ch.lower()]}")
-        elif ch == " ":
-            per_char.append("(space)")
+        for wi, (cw, pw) in enumerate(zip(cipher_words, plain_words)):
+            if len(cw) != len(pw):
+                continue
+            word_mappings: list[str] = []
+            for cc, pc in zip(cw, pw):
+                if cc not in cipher_to_plain:
+                    cipher_to_plain[cc] = pc
+                word_mappings.append(f"{cc}->{pc}")
+            cw_display = f" {cw}" if wi > 0 else cw
+            cipher_dashed = dash.join(cw)
+            plain_dashed = dash.join(pw)
+            nl_mappings = "\n".join(word_mappings)
+            if wi > 0:
+                lines.append("")
+            lines.append(
+                f"【{cw_display}】->【{pw}】\n{cipher_dashed}->{plain_dashed}\n{nl_mappings}"
+            )
+
+    lines.append("")
+    all_mappings = "\n".join(
+        f"{c}->{cipher_to_plain.get(c, '?')}" for c in "abcdefghijklmnopqrstuvwxyz"
+    )
+    lines.append(f"Mapping so far\n{all_mappings}")
+    plain_to_cipher_all = {v: k for k, v in cipher_to_plain.items()}
+    inverse_mappings = "\n".join(
+        f"{c}->{plain_to_cipher_all.get(c, '?')}" for c in "abcdefghijklmnopqrstuvwxyz"
+    )
+    lines.append(f"Inverse mapping\n{inverse_mappings}")
+    unknown_mapping_chars = [
+        c for c in "abcdefghijklmnopqrstuvwxyz" if c not in cipher_to_plain
+    ]
+    mapped_targets = set(cipher_to_plain.values())
+    unmapped_targets = sorted(
+        c for c in "abcdefghijklmnopqrstuvwxyz" if c not in mapped_targets
+    )
+    nl_unknown = "\n".join(unknown_mapping_chars)
+    nl_unmapped = "\n".join(unmapped_targets)
+    lines.append(f"Unknown characters\n{nl_unknown}")
+    lines.append(f"Unmapped target letters\n{nl_unmapped}")
+
+    lines.append("")
+    question_words = problem.question.split()
+    lines.append(f"Now decrypting 【 {problem.question}】:")
+    plain_to_cipher: dict[str, str] = {v: k for k, v in cipher_to_plain.items()}
+    decoded_words: list[str] = [""] * len(question_words)
+    unknown_words: list[
+        tuple[int, str, str, str, str]
+    ] = []  # (index, cipher_word, partial, display_partial, orig_dashed)
+
+    for i, cw in enumerate(question_words):
+        decrypted_chars: list[str] = []
+        display_chars: list[str] = []
+        mapping_steps: list[str] = []
+        has_unknown = False
+        for cc in cw:
+            if cc in cipher_to_plain:
+                decrypted_chars.append(cipher_to_plain[cc])
+                display_chars.append(cipher_to_plain[cc])
+                mapping_steps.append(f"{cc}->{cipher_to_plain[cc]}")
+            else:
+                decrypted_chars.append("?")
+                display_chars.append(f"({cc})")
+                mapping_steps.append(f"{cc}->?")
+                has_unknown = True
+
+        partial = "".join(decrypted_chars)
+        display_partial = "".join(display_chars)
+        step_str = "\n".join(mapping_steps)
+        cipher_dashed = dash.join(cw)
+        plain_dashed = dash.join(display_chars)
+        if i > 0:
+            lines.append("")
+        if has_unknown:
+            lines.append(
+                f"【 {cw}】\n{cipher_dashed}\n{step_str}\n{plain_dashed}->【{plain_dashed}】-> {plain_dashed}"
+            )
+            orig_dashed = dash.join(display_chars)
+            unknown_words.append((i, cw, partial, display_partial, orig_dashed))
         else:
-            per_char.append(f"'{ch}'")
-    lines.append("  " + ", ".join(per_char))
+            lines.append(
+                f"【 {cw}】\n{cipher_dashed}\n{step_str}\n{plain_dashed}->【{partial}】-> {partial}"
+            )
+            decoded_words[i] = partial
+
+    # Collect all unknown cipher chars across all question words
+    all_unknown_chars: set[str] = set()
+    for _, cw, _, _, _ in unknown_words:
+        for cc in cw:
+            if cc not in cipher_to_plain:
+                all_unknown_chars.add(cc)
+
+    # Show current sentence state
+    sentence_parts = []
+    for i, cw in enumerate(question_words):
+        if decoded_words[i]:
+            sentence_parts.append(decoded_words[i])
+        else:
+            display = dash.join(
+                f"({cc})" if cc not in cipher_to_plain else cipher_to_plain[cc]
+                for cc in cw
+            )
+            sentence_parts.append(display)
     lines.append("")
-    lines.append(f"Decoded: {decoded}")
+    lines.append("The sentence currently is")
+    lines.append(" ".join(sentence_parts))
+
     lines.append("")
-    lines.append(f"The answer in \\boxed{{}} is \\boxed{{{decoded}}}")
+    if all_unknown_chars:
+        iter_parts = "\n".join(
+            f"{c} {'yes' if c in all_unknown_chars else 'no'}"
+            for c in sorted(unknown_mapping_chars)
+        )
+        lines.append(
+            f"Iterating over the unknown letters to see if they are in the question\n{iter_parts}"
+        )
+        unknown_in_question = sorted(all_unknown_chars)
+        lines.append("")
+        nl_unknown_q = "\n".join(unknown_in_question)
+        lines.append(f"The unknown letters\n{nl_unknown_q}")
+        lines.append("")
+        lines.append("Let me find the best matching wonderland words:")
+    else:
+        lines.append(
+            "Iterating over the unknown letters to see if they are in the question: no unknown letters"
+        )
+
+    if unknown_words:
+        wonderland_set = set(wonderland_words)
+        initial_c2p = dict(cipher_to_plain)
+
+        for idx, cw, _partial_orig, display_partial, orig_dashed in unknown_words:
+            # Recompute partial with current mappings (may have new letters from previous words)
+            partial = "".join(
+                cipher_to_plain[cc] if cc in cipher_to_plain else "?" for cc in cw
+            )
+            candidates = _candidate_words_for_partial(
+                partial, cipher_to_plain, plain_to_cipher, cw
+            )
+            display_candidates = sorted(candidates)
+            if not display_candidates:
+                return None
+
+            display_dashed = dash.join(
+                f"({cc})" if cc not in cipher_to_plain else cipher_to_plain[cc]
+                for cc in cw
+            )
+            accumulated_new = [
+                f"【({cc})】->【{cipher_to_plain[cc]}】"
+                for cc in sorted(cipher_to_plain)
+                if cc not in initial_c2p
+            ]
+            lines.append("")
+            lines.append(f"【{orig_dashed}】")
+            if accumulated_new:
+                lines.append(f"New mappings: {', '.join(accumulated_new)}")
+            else:
+                lines.append("New mappings: none")
+            lines.append(f"【{display_dashed}】")
+
+            # Iterate over all wonderland words, checking each against the partial
+            target_len = len(cw)
+            lines.append(f"The length of the word is {target_len}.")
+            for word in wonderland_words:
+                wlen = len(word)
+                if wlen != target_len:
+                    lines.append(f"{word} {wlen} length")
+                    continue
+                # Letter-by-letter comparison with early stop on mismatch
+                word_dashed = dash.join(word)
+                comparisons: list[str] = []
+                mismatch_found = False
+                tentative: dict[str, str] = {}
+                mapped_plain = set(cipher_to_plain.values())
+                for pos, (wi_char, cc) in enumerate(zip(word, cw)):
+                    if cc in cipher_to_plain:
+                        pc = cipher_to_plain[cc]
+                        if wi_char == pc:
+                            comparisons.append(f"{pos}【{wi_char}】【{pc}】match")
+                        else:
+                            comparisons.append(f"{pos}【{pc}】【{wi_char}】unmatchable")
+                            mismatch_found = True
+                            break
+                    else:
+                        if cc in tentative:
+                            if tentative[cc] == wi_char:
+                                comparisons.append(f"{pos}【{wi_char}】【({cc})】consistent")
+                            else:
+                                comparisons.append(f"{pos}【{wi_char}】【({cc})】contradiction")
+                                mismatch_found = True
+                                break
+                        else:
+                            if wi_char in mapped_plain:
+                                comparisons.append(f"{pos}【{wi_char}】【({cc})】untargeted")
+                                mismatch_found = True
+                                break
+                            tentative[cc] = wi_char
+                            comparisons.append(f"{pos}【{wi_char}】【({cc})】matchable")
+                comp_str = ", ".join(comparisons)
+                if not mismatch_found:
+                    comp_str += f", {len(cw)} all match"
+                lines.append(f"{word} {wlen} 【{word_dashed}】, {comp_str}")
+
+            # Filter candidates: reject those mapping unknown cipher letters to already-mapped plain letters
+            unmapped = {
+                c
+                for c in "abcdefghijklmnopqrstuvwxyz"
+                if c not in cipher_to_plain.values()
+            }
+            remaining = []
+            for c in display_candidates:
+                bad = False
+                for ci, wi in zip(cw, c):
+                    if ci not in cipher_to_plain and wi not in unmapped:
+                        bad = True
+                        break
+                if not bad:
+                    remaining.append(c)
+
+            # Prefer wonderland words among remaining
+            wonderland_remaining = [c for c in remaining if c in wonderland_set]
+            if wonderland_remaining:
+                chosen = wonderland_remaining[0]
+            elif remaining:
+                chosen = remaining[0]
+            else:
+                return None
+            lines.append(f"Best match: 【{chosen}】")
+            decoded_words[idx] = chosen
+
+            # Show resolved dashed display
+            resolved_dashed = dash.join(chosen)
+            lines.append(f"【{display_dashed}】->【{resolved_dashed}】")
+
+            # Per-letter breakdown: same vs new mapping
+            new_mappings: list[str] = []
+            pending_mappings: list[tuple[str, str]] = []
+            for cc, pc in zip(cw, chosen):
+                if cc in cipher_to_plain:
+                    known_plain = cipher_to_plain[cc]
+                    lines.append(f"【{known_plain}】->【{pc}】same")
+                else:
+                    lines.append(f"【({cc})】->【{pc}】 new")
+                    if (cc, pc) not in pending_mappings:
+                        pending_mappings.append((cc, pc))
+                        new_mappings.append(f"【({cc})】->【{pc}】")
+            for cc, pc in pending_mappings:
+                cipher_to_plain[cc] = pc
+                plain_to_cipher[pc] = cc
+            if new_mappings:
+                nl_new = "\n".join(new_mappings)
+                lines.append(f"Added mappings\n{nl_new}")
+
+    if any(w == "" for w in decoded_words):
+        return None
+
+    computed = " ".join(decoded_words)
+    lines.append("")
+    lines.append("I will now return the answer in \\boxed{}")
+    lines.append("The answer in \\boxed{–} is \\boxed{%s}" % computed)
     return "\n".join(lines)
