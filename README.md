@@ -735,3 +735,6 @@ Three problems surfaced during today's diagnostic round (train job 6664554 → 0
 #### 3. Reconsider Kaggle top-voted author's strategy
 
 The current pipeline (algo-driven CoT trace generation → SFT on Nemotron-3-Nano with rank-16 LoRA → vLLM eval) has consumed multiple iteration cycles to reach 0.57, with each remaining gap (equation_numeric absent, bit_manipulation procedure not executable by the LoRA) requiring substantial bespoke work to close. The published high-voted Kaggle notebooks for this competition take different approaches that are worth a careful review before committing more time to the current direction — particularly any that bypass per-category trace-style SFT in favor of in-context patterns, tool-use scaffolding, or smaller-model ensembles. Action: harvest 2–3 top-voted public notebooks, summarize their solver design and reported scores, and decide explicitly whether to (a) absorb a useful idea into the current pipeline, (b) fork to a parallel pipeline, or (c) confirm the current direction is competitive and continue. Doing this *before* spending another day on the equation_numeric generator avoids deepening a sunk cost.
+
+
+train_id: 6698653
