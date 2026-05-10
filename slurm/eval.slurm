@@ -8,34 +8,25 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
-# Paired base + LoRA eval at Kaggle params, then submission packaging.
+# LoRA-adapted eval at Kaggle params on the local stratified holdout.
+#
+# Baseline eval and submission packaging are intentionally not here:
+#   - base-model numbers come from prior Kaggle leaderboard submissions
+#   - submission zip is built by slurm/package.slurm (CPU-only, separate job)
 #
 # Submit standalone:
 #   sbatch slurm/eval.slurm
-# Or chained after a train job:
-#   sbatch --dependency=afterok:<train_id> slurm/eval.slurm
 # Or against a specific archived adapter:
 #   LORA_ADAPTER_DIR=$HOME/Nemotron_Challenge/outputs/lora_adapter_<JOB_ID> \
 #     sbatch slurm/eval.slurm
-#
-# 2026-05-08: walltime bumped 1h -> 2:30 after job 6673063 timed out at 1h on
-# the 600-prompt stratified holdout. The previous 1h was sized for the
-# 200-prompt single-category numeral_holdout where responses were ~600 chars;
-# the stratified set is 3x the prompts and includes bit_manipulation /
-# equation_numeric / cipher categories where base-model responses can
-# generate to max_tokens=7680 at temp=0. Two model loads + two evals at this
-# scale fit comfortably in 2:30.
 
 set -euo pipefail
 
 PROJECT_DIR=$HOME/Nemotron_Challenge
 EVAL_CONTAINER=${VLLM_LORA_EVAL_CONTAINER:-$SCRATCH/containers/nemotron_vllm_v0200_cu129.sif}
-TRAIN_CONTAINER=$SCRATCH/containers/nemotron_vllm.sif
 ADAPTER_DIR=${LORA_ADAPTER_DIR:-$PROJECT_DIR/outputs/lora_adapter}
 
 LORA_OUTPUT=outputs/lora_eval_${SLURM_JOB_ID}.jsonl
-BASE_OUTPUT=outputs/base_eval_${SLURM_JOB_ID}.jsonl
-SUBMISSION_ZIP=outputs/submission_${SLURM_JOB_ID}.zip
 
 export HF_HOME=$SCRATCH/huggingface
 export TRANSFORMERS_CACHE=$SCRATCH/huggingface
@@ -88,20 +79,7 @@ if [ "$ADAPTER_DIR" != "$PROJECT_DIR/outputs/lora_adapter" ]; then
 fi
 
 echo ""
-echo "=== Stage 3: Base-model eval (LoRA disabled, paired baseline) ==="
-apptainer exec --nv \
-  --bind $PROJECT_DIR:/workspace \
-  --bind $SCRATCH:$SCRATCH \
-  "$EVAL_CONTAINER" \
-  bash -lc "
-    cd /workspace
-    python3 scripts/baseline_generate.py \
-      --config configs/eval_kaggle_base.yaml \
-      --output $BASE_OUTPUT
-  "
-
-echo ""
-echo "=== Stage 4: LoRA-adapted eval ==="
+echo "=== Stage 3: LoRA-adapted eval ==="
 apptainer exec --nv \
   --bind $PROJECT_DIR:/workspace \
   --bind $SCRATCH:$SCRATCH \
@@ -114,34 +92,18 @@ apptainer exec --nv \
   "
 
 echo ""
-echo "=== Stage 5: Paired score ==="
+echo "=== Stage 4: Score ==="
 apptainer exec \
   --bind $PROJECT_DIR:/workspace \
   "$EVAL_CONTAINER" \
   bash -lc "
     cd /workspace
-    echo '--- Base model (LoRA disabled) ---'
-    python3 scripts/evaluate.py --predictions $BASE_OUTPUT --score --by-category
-    echo ''
-    echo '--- LoRA-adapted model ---'
     python3 scripts/evaluate.py --predictions $LORA_OUTPUT --score --by-category
   "
 
 echo ""
-echo "=== Stage 6: Package submission ==="
-apptainer exec \
-  --bind $PROJECT_DIR:/workspace \
-  "$TRAIN_CONTAINER" \
-  bash -lc "
-    cd /workspace
-    python3 scripts/package_submission.py \
-      --adapter $ADAPTER_DIR \
-      --output  $SUBMISSION_ZIP
-  "
-
-echo ""
 echo "=== Eval artifacts ==="
-ls -lh $LORA_OUTPUT $BASE_OUTPUT $SUBMISSION_ZIP
+ls -lh $LORA_OUTPUT
 
 echo ""
 echo "Eval job $SLURM_JOB_ID finished at: $(date)"
