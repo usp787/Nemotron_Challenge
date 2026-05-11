@@ -1,0 +1,77 @@
+# Phase 6 production training config — full THK 04-10-04-33 recipe.
+#
+# This is the smoke_train.yaml recipe with the 20-step cap relaxed for a
+# production run on data/sft_combined.jsonl (17,391 records). Every other
+# field is byte-for-byte identical to configs/smoke_train.yaml so that the
+# smoke validates the *exact* config that runs here.
+#
+# Provenance: THK's released training config at training/sft/04-10-04-33/
+# in the read-only mirror (decision + 4-signal rationale recorded in
+# docs/rebuild_checklist.md Phase 8).
+#
+# DELTAS vs configs/smoke_train.yaml:
+#   - train.max_steps: 20 -> 300     (TODO — see comment by the field)
+#   - train.logging_steps: 1 (kept)  — loss-curve watch needs fine grain
+#   - output.adapter_dir:
+#       outputs/lora_adapter_smoke -> outputs/lora_adapter_thk
+#
+# WHAT IS *NOT* CHANGED (these came in via the smoke and are locked):
+#   - lora.r = 32                              (THK match; was 16 in lora_verification.yaml)
+#   - train.gradient_accumulation_steps = 64   (effective batch 64; THK match)
+#   - train.lr_scheduler = linear              (THK match; was cosine)
+#   - train.warmup_ratio = 0.0                 (THK has no warmup)
+#   - train.adam_beta2 = 0.95                  (THK match; HF default is 0.999)
+#   - data.input_path = data/sft_combined.jsonl
+
+model:
+  name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  dtype: bfloat16
+  trust_remote_code: true
+
+lora:
+  r: 32
+  alpha: 32
+  dropout: 0.0
+  target_modules: all-linear
+  bias: none
+  task_type: CAUSAL_LM
+
+data:
+  input_path: data/sft_combined.jsonl
+  max_seq_len: 8192
+  mask_user_loss: true
+
+train:
+  num_epochs: 1
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 64
+  learning_rate: 2.0e-4
+  lr_scheduler: linear
+  warmup_ratio: 0.0
+  weight_decay: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+  gradient_checkpointing: true
+  bf16: true
+  logging_steps: 1
+  save_steps: 0
+  seed: 42
+
+  # TODO (fill in after smoke_train Stage 4 reports sec/step):
+  #   - Default 300 = option B from the Phase 6 walltime menu. Strictly
+  #     greater than THK 04-10-04-33's 245-step natural stop, so it does
+  #     not under-train the adapter even if the trainer doesn't otherwise
+  #     terminate.
+  #   - One full epoch at effective batch 64 is 17391 / 64 = 271.7 -> 272
+  #     steps. 300 also exceeds one full epoch, so functionally this is
+  #     "train one epoch and stop". To run >1 epoch, raise this cap AND
+  #     raise num_epochs above.
+  #   - If smoke reports <= 60 sec/optimizer-step, 300 is safe at the 08:00
+  #     walltime in slurm/train_thk_full.slurm. If sec/step is materially
+  #     higher, EITHER raise --time in the slurm OR drop this back toward
+  #     245 (THK's natural stop) — do NOT push it below 245.
+  max_steps: 300
+
+output:
+  adapter_dir: outputs/lora_adapter_thk
