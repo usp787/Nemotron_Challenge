@@ -98,7 +98,12 @@ apptainer exec --nv \
 
 echo ""
 echo "Diagnostic JSON written to $DIAG_JSON"
-test -f $PROJECT_DIR/$DIAG_JSON && cat $PROJECT_DIR/$DIAG_JSON | python3 -m json.tool | head -n 60
+# Show the first ~60 lines of the JSON without using a fragile cat|json.tool|head
+# pipe. Job 6704908 died here (exit 32) because head closed the pipe early,
+# upstream SIGPIPE propagated, set -e killed the script *before* Stage 4 ran.
+if [ -f "$PROJECT_DIR/$DIAG_JSON" ]; then
+    head -n 60 "$PROJECT_DIR/$DIAG_JSON" || true
+fi
 
 echo ""
 echo "=== Stage 4: 20-step LoRA train (rank=32, grad_accum=64) ==="
