@@ -17,6 +17,22 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
+# ───────────────────────────────────────────────────────────────────────
+# DEPRECATED — DO NOT SUBMIT.
+#
+# This script was designed for path alpha (single uninterrupted run on the
+# gpu partition). Smoke job 6710260 measured ~230 sec/optimizer-step on a
+# single H200, so a faithful THK run (245 steps) requires ~15.7h. The gpu
+# partition's hard TIMELIMIT is 8h, so a single-job approach is infeasible.
+#
+# Use slurm/train_thk_chunk.slurm instead. That script splits the run into
+# 3 chunks of ~82 steps each, persisting optimizer/scheduler/sampler state
+# between chunks. See docs/path_beta_runbook.md for the operational sequence.
+#
+# This file is retained for reference. Submitting it WILL time out before
+# the run completes.
+# ───────────────────────────────────────────────────────────────────────
+#
 # Phase 6 production LoRA training run.
 #
 # Runs the THK 04-10-04-33 recipe (configs/train_thk_full.yaml) over the

@@ -213,6 +213,33 @@ def _make_length_bucketed_sampler(lengths: list[int], batch_size: int, seed: int
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
+    # Path-beta chunking flags. All optional; backward-compatible with the
+    # single-shot invocation used by smoke_train.slurm / lora_verification.slurm.
+    ap.add_argument(
+        "--resume-from-checkpoint",
+        dest="resume_from_checkpoint",
+        default=None,
+        help="Path to a previous chunk's output dir containing adapter_config.json + "
+             "adapter_model.safetensors + training_state.pt. When set, the run "
+             "continues from that state (optimizer momentum, LR schedule position, "
+             "and sampler position are all restored).",
+    )
+    ap.add_argument(
+        "--max-steps",
+        dest="max_steps_cli",
+        type=int,
+        default=None,
+        help="Override train.max_steps in the YAML for THIS process invocation. "
+             "Path-beta uses this to cap each chunk's cumulative global_step "
+             "(chunk 1=82, chunk 2=164, chunk 3=246).",
+    )
+    ap.add_argument(
+        "--output-dir",
+        dest="output_dir_cli",
+        default=None,
+        help="Override output.adapter_dir in the YAML so each chunk writes its "
+             "adapter + training_state to a chunk-specific directory.",
+    )
     args = ap.parse_args()
 
     cfg = load_yaml(args.config)
@@ -278,7 +305,20 @@ def main() -> None:
         task_type=lora_cfg.get("task_type", "CAUSAL_LM"),
         target_modules=lora_cfg["target_modules"],
     )
-    model = get_peft_model(base, peft_config)
+    if args.resume_from_checkpoint:
+        from peft import PeftModel
+        resume_dir_path = Path(args.resume_from_checkpoint)
+        if not (resume_dir_path / "adapter_config.json").is_file():
+            raise SystemExit(f"resume dir missing adapter_config.json: {resume_dir_path}")
+        if not (resume_dir_path / "training_state.pt").is_file():
+            raise SystemExit(f"resume dir missing training_state.pt: {resume_dir_path}")
+        # is_trainable=True is critical: the default is inference mode, which
+        # freezes the adapter weights and would silently produce a non-training
+        # run that overwrites the checkpoint with unchanged weights.
+        print(f"[info] resuming LoRA weights from: {resume_dir_path}")
+        model = PeftModel.from_pretrained(base, str(resume_dir_path), is_trainable=True)
+    else:
+        model = get_peft_model(base, peft_config)
     model.print_trainable_parameters()
 
     bs = train_cfg.get("per_device_batch_size", 1)
@@ -306,7 +346,12 @@ def main() -> None:
     # by step 285 of 421, so the tail is overfit churn that also blew the
     # 5h SLURM walltime. The cosine schedule still spans total_steps_full
     # so the LR shape matches what we'd get without the cap.
-    max_steps_cfg = int(train_cfg.get("max_steps", 0) or 0)
+    config_max_steps = int(train_cfg.get("max_steps", 0) or 0)
+    if args.max_steps_cli is not None:
+        max_steps_cfg = int(args.max_steps_cli)
+        print(f"[info] CLI --max-steps={max_steps_cfg} (overrides config max_steps={config_max_steps})")
+    else:
+        max_steps_cfg = config_max_steps
     total_steps = min(total_steps_full, max_steps_cfg) if max_steps_cfg > 0 else total_steps_full
     warmup_steps = max(1, int(total_steps_full * float(train_cfg.get("warmup_ratio", 0.03))))
 
@@ -338,21 +383,86 @@ def main() -> None:
     else:
         raise ValueError(f"unknown lr_scheduler: {scheduler_name!r}")
 
+    # Path-beta resume: restore optimizer + scheduler state from a previous
+    # chunk's training_state.pt. Optimizer state holds AdamW momentum (m) and
+    # variance (v) per trainable param; without it, each chunk would start
+    # with zero-momentum gradients and corrupt the recipe. Scheduler state
+    # holds the LR schedule's step counter so decay continues smoothly.
+    resume_global_step = 0
+    resume_epoch = 0
+    resume_samples_in_epoch = 0
+    if args.resume_from_checkpoint:
+        state_path = Path(args.resume_from_checkpoint) / "training_state.pt"
+        print(f"[info] loading training state: {state_path}")
+        # weights_only=False because the state dict contains optimizer
+        # internals (tensors + python ints) that don't satisfy the
+        # weights-only safelist. The file comes from our own previous run,
+        # so trusting it is fine.
+        saved_state = torch.load(state_path, map_location="cpu", weights_only=False)
+        optim.load_state_dict(saved_state["optimizer"])
+        sched.load_state_dict(saved_state["scheduler"])
+        resume_global_step = int(saved_state["global_step"])
+        resume_epoch = int(saved_state["epoch_in_progress"])
+        resume_samples_in_epoch = int(saved_state["samples_consumed_in_epoch"])
+        print(
+            f"[info] resumed: global_step={resume_global_step}, "
+            f"epoch_in_progress={resume_epoch}, "
+            f"samples_consumed_in_epoch={resume_samples_in_epoch}"
+        )
+
     log_every = int(train_cfg.get("logging_steps", 5))
     model.train()
-    global_step = 0
+    global_step = resume_global_step
     optim.zero_grad()
     print(
         f"[info] training: total_optim_steps={total_steps} "
-        f"(uncapped={total_steps_full}, max_steps={max_steps_cfg or 'none'}) warmup={warmup_steps}"
+        f"(uncapped={total_steps_full}, max_steps={max_steps_cfg or 'none'}, "
+        f"starting_global_step={global_step}) warmup={warmup_steps}"
     )
 
+    if resume_epoch >= n_epochs:
+        raise SystemExit(
+            f"[error] resume_epoch={resume_epoch} >= num_epochs={n_epochs}. "
+            f"Either raise num_epochs in the config or stop training (target reached)."
+        )
+
+    # Initialize before the loop so values are defined even if the range is
+    # empty (e.g., resume_epoch == n_epochs). Loop will rebind both.
+    epoch = resume_epoch
+    samples_consumed_in_epoch = resume_samples_in_epoch
     stop = False
-    for epoch in range(n_epochs):
+
+    for epoch in range(resume_epoch, n_epochs):
         if stop:
             break
         sampler.set_epoch(epoch)
-        for micro_step, (input_ids, attn_mask, labels) in enumerate(loader):
+        loader_iter = iter(loader)
+
+        # Path-beta fast-forward: only on the first epoch we enter after a
+        # resume, skip past micro-batches the previous chunk already consumed
+        # from this epoch's deterministic shuffle. This preserves the
+        # "one continuous shuffle" property that THK's single-run had — each
+        # sample is seen at most once across all 3 chunks, not re-shuffled.
+        if epoch == resume_epoch and resume_samples_in_epoch > 0:
+            samples_consumed_in_epoch = resume_samples_in_epoch
+            print(
+                f"[info] resume: fast-forwarding past {samples_consumed_in_epoch} "
+                f"consumed samples in epoch {epoch}"
+            )
+            for _ in range(samples_consumed_in_epoch):
+                try:
+                    next(loader_iter)
+                except StopIteration:
+                    print(
+                        f"[warn] consumed-sample count ({samples_consumed_in_epoch}) "
+                        f">= epoch length; resume state inconsistent"
+                    )
+                    break
+        else:
+            samples_consumed_in_epoch = 0
+
+        for batch in loader_iter:
+            input_ids, attn_mask, labels = batch
             input_ids = input_ids.to(model.device)
             attn_mask = attn_mask.to(model.device)
             labels = labels.to(model.device)
@@ -361,7 +471,9 @@ def main() -> None:
             loss = out.loss / grad_accum
             loss.backward()
 
-            if (micro_step + 1) % grad_accum == 0:
+            samples_consumed_in_epoch += 1
+
+            if samples_consumed_in_epoch % grad_accum == 0:
                 if max_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(
                         (p for p in model.parameters() if p.requires_grad),
@@ -377,21 +489,48 @@ def main() -> None:
                         f"loss={(loss.item() * grad_accum):.4f} lr={sched.get_last_lr()[0]:.2e}"
                     )
                 if max_steps_cfg > 0 and global_step >= max_steps_cfg:
-                    print(f"[info] hit max_steps={max_steps_cfg}, stopping early")
+                    print(f"[info] hit max_steps={max_steps_cfg}, stopping")
                     stop = True
                     break
 
-        # tail: flush any remaining grad
-        if not stop and (micro_step + 1) % grad_accum != 0:
+        # tail: flush any remaining grad. Skip when stopping mid-epoch — the
+        # next chunk's resume should pick up at the same micro-batch boundary
+        # without an extra optimizer step in between.
+        if not stop and samples_consumed_in_epoch % grad_accum != 0:
             optim.step()
             sched.step()
             optim.zero_grad()
 
-    adapter_dir = Path(out_cfg["adapter_dir"])
+    adapter_dir = Path(args.output_dir_cli or out_cfg["adapter_dir"])
     adapter_dir.mkdir(parents=True, exist_ok=True)
     print(f"[info] saving adapter -> {adapter_dir}")
     model.save_pretrained(adapter_dir)
     tokenizer.save_pretrained(adapter_dir)
+
+    # Save path-beta training state alongside the adapter. The next chunk
+    # restores all three of (optimizer state, scheduler state, sampler
+    # position) from this file. Even on the final chunk this is written —
+    # cheap (~7 GB) and useful for post-hoc debugging.
+    training_state = {
+        "optimizer": optim.state_dict(),
+        "scheduler": sched.state_dict(),
+        "global_step": global_step,
+        # If we stopped mid-epoch (max_steps hit), the next chunk continues
+        # in the same epoch. If we ran to the end of the inner loop without
+        # stopping (epoch fully consumed), the next chunk starts a fresh
+        # epoch and the sampler skip count resets to 0.
+        "epoch_in_progress": epoch if stop else (epoch + 1),
+        "samples_consumed_in_epoch": samples_consumed_in_epoch if stop else 0,
+        "seed": seed,
+    }
+    state_path = adapter_dir / "training_state.pt"
+    torch.save(training_state, state_path)
+    print(
+        f"[info] training state saved -> {state_path} "
+        f"(global_step={global_step}, "
+        f"epoch_in_progress={training_state['epoch_in_progress']}, "
+        f"samples_consumed_in_epoch={training_state['samples_consumed_in_epoch']})"
+    )
 
     cfg_files = sorted(p.name for p in adapter_dir.iterdir())
     print(f"[info] adapter dir contents: {cfg_files}")

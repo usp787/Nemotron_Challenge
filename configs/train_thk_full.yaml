@@ -9,11 +9,23 @@
 # in the read-only mirror (decision + 4-signal rationale recorded in
 # docs/rebuild_checklist.md Phase 8).
 #
+# PRODUCTION RUN PATH (path-beta chunked):
+#   Smoke job 6710260 measured ~230 sec/optimizer-step on a single H200.
+#   245 THK-equivalent steps × 230 s ≈ 15.7 hours, exceeding the gpu
+#   partition's 8h walltime cap. Path beta splits the run into 3 SLURM
+#   jobs of ~82 steps each (cumulative 246 ≈ THK's 245 natural stop).
+#   See docs/path_beta_runbook.md for the operational sequence; submit
+#   slurm/train_thk_chunk.slurm three times with THK_CHUNK_IDX=1/2/3.
+#
 # DELTAS vs configs/smoke_train.yaml:
-#   - train.max_steps: 20 -> 300     (TODO — see comment by the field)
+#   - train.max_steps: 20 -> 246     (cumulative target across 3 chunks;
+#     each chunk overrides this via --max-steps CLI to its own ceiling
+#     of 82 / 164 / 246)
 #   - train.logging_steps: 1 (kept)  — loss-curve watch needs fine grain
 #   - output.adapter_dir:
 #       outputs/lora_adapter_smoke -> outputs/lora_adapter_thk
+#     Per-chunk SLURM overrides this via --output-dir to
+#       outputs/lora_adapter_thk_chunk{1,2,3} so chunks don't clobber.
 #
 # WHAT IS *NOT* CHANGED (these came in via the smoke and are locked):
 #   - lora.r = 32                              (THK match; was 16 in lora_verification.yaml)
@@ -58,20 +70,13 @@ train:
   save_steps: 0
   seed: 42
 
-  # TODO (fill in after smoke_train Stage 4 reports sec/step):
-  #   - Default 300 = option B from the Phase 6 walltime menu. Strictly
-  #     greater than THK 04-10-04-33's 245-step natural stop, so it does
-  #     not under-train the adapter even if the trainer doesn't otherwise
-  #     terminate.
-  #   - One full epoch at effective batch 64 is 17391 / 64 = 271.7 -> 272
-  #     steps. 300 also exceeds one full epoch, so functionally this is
-  #     "train one epoch and stop". To run >1 epoch, raise this cap AND
-  #     raise num_epochs above.
-  #   - If smoke reports <= 60 sec/optimizer-step, 300 is safe at the 08:00
-  #     walltime in slurm/train_thk_full.slurm. If sec/step is materially
-  #     higher, EITHER raise --time in the slurm OR drop this back toward
-  #     245 (THK's natural stop) — do NOT push it below 245.
-  max_steps: 300
+  # Cumulative target across all path-beta chunks. 246 sits 1 step above
+  # THK 04-10-04-33's 245-step natural stop, leaving the final-step LR at
+  # ~1.85e-5 (= 2e-4 * (25/271)) — close to but not yet zero on the linear
+  # decay over the 271-step "one full epoch" basis. Each chunk's SLURM
+  # invocation passes a per-chunk --max-steps {82,164,246} that overrides
+  # this for THIS process; the value here is the final-chunk target.
+  max_steps: 246
 
 output:
   adapter_dir: outputs/lora_adapter_thk
