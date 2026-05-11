@@ -310,12 +310,33 @@ def main() -> None:
     total_steps = min(total_steps_full, max_steps_cfg) if max_steps_cfg > 0 else total_steps_full
     warmup_steps = max(1, int(total_steps_full * float(train_cfg.get("warmup_ratio", 0.03))))
 
+    adam_beta1 = float(train_cfg.get("adam_beta1", 0.9))
+    adam_beta2 = float(train_cfg.get("adam_beta2", 0.999))
+    adam_eps = float(train_cfg.get("adam_eps", 1e-8))
+    max_grad_norm = float(train_cfg.get("max_grad_norm", 0.0) or 0.0)
     optim = torch.optim.AdamW(
         (p for p in model.parameters() if p.requires_grad),
         lr=lr,
+        betas=(adam_beta1, adam_beta2),
+        eps=adam_eps,
         weight_decay=float(train_cfg.get("weight_decay", 0.0)),
     )
-    sched = get_cosine_schedule_with_warmup(optim, warmup_steps, total_steps_full)
+
+    # THK's 04-10-04-33 used StepLinearDecayLRSchedule (linear decay from
+    # peak LR to 0 over total_steps, no warmup). Our default remains cosine
+    # for backward compat with the iteration-2/3 verification baseline.
+    scheduler_name = str(train_cfg.get("lr_scheduler", "cosine"))
+    if scheduler_name == "linear":
+        from transformers import get_linear_schedule_with_warmup
+        sched = get_linear_schedule_with_warmup(
+            optim, warmup_steps, total_steps_full
+        )
+    elif scheduler_name == "cosine":
+        sched = get_cosine_schedule_with_warmup(
+            optim, warmup_steps, total_steps_full
+        )
+    else:
+        raise ValueError(f"unknown lr_scheduler: {scheduler_name!r}")
 
     log_every = int(train_cfg.get("logging_steps", 5))
     model.train()
@@ -341,6 +362,11 @@ def main() -> None:
             loss.backward()
 
             if (micro_step + 1) % grad_accum == 0:
+                if max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        (p for p in model.parameters() if p.requires_grad),
+                        max_grad_norm,
+                    )
                 optim.step()
                 sched.step()
                 optim.zero_grad()

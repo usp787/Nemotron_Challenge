@@ -1,0 +1,69 @@
+# Smoke-train config — verifies the new THK-recipe deltas on a single H200
+# WITHOUT committing to a full multi-hour run.
+#
+# Differs from configs/lora_verification.yaml ONLY on:
+#   - lora.r: 32 (was 16) — matches THK's 04-10-04-33
+#   - train.gradient_accumulation_steps: 64 (was 16) — effective batch 64
+#   - train.lr_scheduler: linear (was cosine)
+#   - train.warmup_ratio: 0.0 (was 0.03)
+#   - train.adam_beta2: 0.95 (was HF default 0.999) — THK setting
+#   - train.max_steps: 20 (was 300) — short shake-down only
+#   - data.input_path: data/sft_combined.jsonl (was sft_traces.jsonl)
+#
+# Pass criterion for the smoke run:
+#   1. Model + LoRA(rank=32) loads inside container VRAM
+#   2. Dataset tokenizes without crashes; overflow rate < 5% per category
+#   3. <think>/</think> boundary aligns cleanly
+#   4. 20 optimizer steps complete with loss decreasing
+#   5. Adapter saves with adapter_config.json + adapter_model.safetensors
+#   6. vLLM loads the saved adapter (handled by a separate eval probe job)
+#
+# After this passes, configs/lora_full_thk.yaml (or this file with
+# max_steps removed and walltime bumped to 16h) is the production run.
+
+model:
+  name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  dtype: bfloat16
+  trust_remote_code: true
+
+lora:
+  r: 32                              # was 16, match THK
+  alpha: 32
+  dropout: 0.0
+  target_modules: all-linear
+  bias: none
+  task_type: CAUSAL_LM
+
+data:
+  input_path: data/sft_combined.jsonl  # was sft_traces.jsonl
+  max_seq_len: 8192
+  mask_user_loss: true
+
+train:
+  num_epochs: 1
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 64    # was 16, effective batch = 64 (THK match)
+  learning_rate: 2.0e-4
+  lr_scheduler: linear               # was cosine
+  warmup_ratio: 0.0                  # was 0.03 — THK has no warmup
+  weight_decay: 0.0
+  # AdamW betas. HF default is (0.9, 0.999); THK uses (0.9, 0.95). beta2 is
+  # the second-moment decay; lower => faster adaptation to gradient variance,
+  # standard for transformer SFT but explicit override needed in our trainer.
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+  # max_grad_norm omitted (== 0) => no clipping, matching THK's 1e9 setting.
+  gradient_checkpointing: true
+  bf16: true
+  logging_steps: 1                   # tighten so all 20 steps land in the log
+  save_steps: 0
+  seed: 42
+  # 20 optimizer steps. At effective batch 64 this trains on 64*20 = 1280
+  # records (~7% of the 17K corpus) — enough to verify the trainer makes
+  # progress and saves a structurally complete adapter, not enough to
+  # actually converge.
+  max_steps: 20
+
+output:
+  adapter_dir: outputs/lora_adapter_smoke
