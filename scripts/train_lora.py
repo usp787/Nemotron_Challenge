@@ -296,7 +296,16 @@ def main() -> None:
     if train_cfg.get("gradient_checkpointing", True):
         base.gradient_checkpointing_enable()
 
-    print(f"[info] applying LoRA: r={lora_cfg['r']} alpha={lora_cfg['alpha']} target={lora_cfg['target_modules']}")
+    # modules_to_save: full-rank fine-tuning of the listed modules in addition
+    # to LoRA on target_modules. Used here to train lm_head, replicating THK's
+    # `train_unembed=True` (04-10-04-33 config.json line 18). peft's
+    # target_modules="all-linear" explicitly excludes lm_head, which is why
+    # the adapter must opt it in separately.
+    modules_to_save = lora_cfg.get("modules_to_save")
+    print(
+        f"[info] applying LoRA: r={lora_cfg['r']} alpha={lora_cfg['alpha']} "
+        f"target={lora_cfg['target_modules']} modules_to_save={modules_to_save}"
+    )
     peft_config = LoraConfig(
         r=lora_cfg["r"],
         lora_alpha=lora_cfg["alpha"],
@@ -304,6 +313,7 @@ def main() -> None:
         bias=lora_cfg.get("bias", "none"),
         task_type=lora_cfg.get("task_type", "CAUSAL_LM"),
         target_modules=lora_cfg["target_modules"],
+        modules_to_save=modules_to_save,
     )
     if args.resume_from_checkpoint:
         from peft import PeftModel

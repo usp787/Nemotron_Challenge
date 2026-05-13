@@ -31,6 +31,10 @@ lora:
   alpha: 32
   dropout: 0.0
   target_modules: all-linear
+  # Match train_thk_full.yaml so the smoke validates the exact LoRA shape
+  # that the production run uses. Adapter file grows by lm_head's full bf16
+  # weights — relevant for the smoke save check at line 18.
+  modules_to_save: [lm_head]
   bias: none
   task_type: CAUSAL_LM
 

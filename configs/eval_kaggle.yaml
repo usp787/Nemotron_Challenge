@@ -36,6 +36,12 @@ data:
   # equation_numeric — see memory:feedback_holdout_must_be_stratified.
   input_path: data/stratified_holdout.jsonl
   output_dir: outputs
+  # Match THK's training+inference prompt shape. MUST stay aligned with
+  # build_sft_traces.py --append-thk-suffix used to build sft_traces.jsonl,
+  # otherwise the inference distribution diverges from training and per-
+  # category accuracy collapses on format-sensitive tasks (bit_manipulation,
+  # cryptarithm). Flip off only when you re-train without the suffix.
+  append_thk_suffix: true
 
 logging:
   save_prompt: true

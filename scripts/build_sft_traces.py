@@ -40,6 +40,11 @@ Usage (current baseline behaviour):
 
 Usage (matches THK's full-coverage corpus):
     python scripts/build_sft_traces.py --keep-wrong-traces --use-reasoner-boxed --holdout 50
+
+Usage (THK corpus + upsample the data-starved category by shuffling
+example order; each shuffle produces a distinct reasoner CoT):
+    python scripts/build_sft_traces.py --keep-wrong-traces --use-reasoner-boxed \\
+        --holdout 50 --upsample equation_numeric_guess:6
 """
 from __future__ import annotations
 
@@ -60,6 +65,51 @@ from reasoners.store_types import build_problem  # noqa: E402
 
 
 _BOXED_RE = re.compile(r"\\boxed\{([^}]*)(?:\}|$)")
+
+# THK's `PROMPT_SUFFIX` from nemotron-tonghuikang-source/corpus.py:38-41.
+# Appended to every reasoner-record user prompt at training time so the model
+# sees the same prompt shape that THK's submission notebook produces at
+# inference. NOT applied to augmenter records (THK's corpus.py:245 passes
+# suffix="" for augmenter prompts).
+THK_PROMPT_SUFFIX = (
+    "\nPlease put your final answer inside `\\boxed{}`. "
+    "For example: `\\boxed{your answer}`"
+)
+
+
+def shuffle_example_order(prompt: str, seed: int) -> str | None:
+    """Return a copy of `prompt` with the example lines reshuffled.
+
+    The Kaggle prompt layout for equation_numeric / cryptarithm tasks is::
+
+        <one-line intro that ends with "examples:">
+        <example 1>
+        ...
+        <example N>
+        Now, ...
+
+    We shuffle lines [1:now_idx] using ``seed`` and rejoin. Returns ``None``
+    when the structure isn't recognised or there are <2 example lines.
+    """
+    lines = prompt.splitlines()
+    now_idx = -1
+    for i, line in enumerate(lines):
+        if line.strip().startswith("Now,"):
+            now_idx = i
+            break
+    if now_idx < 2:  # need at least intro + 1 example + Now-line
+        return None
+    intro = lines[:1]
+    examples = lines[1:now_idx]
+    rest = lines[now_idx:]
+    if len(examples) < 2:
+        return None
+    rng = random.Random(seed)
+    shuffled = list(examples)
+    rng.shuffle(shuffled)
+    if shuffled == examples:  # nothing actually changed
+        return None
+    return "\n".join(intro + shuffled + rest)
 
 
 def extract_boxed(text: str) -> str:
@@ -149,7 +199,37 @@ def main() -> None:
              "(rather than the ground-truth answer). Matches THK's "
              "04-10-04-33 behaviour. Default: rewrite to ground truth.",
     )
+    ap.add_argument(
+        "--upsample", action="append", default=[],
+        metavar="CAT:K",
+        help="Generate K total traces per problem in CAT by shuffling the "
+             "example-line order in the user prompt (the reasoner branches "
+             "on first-example, so different orderings yield distinct CoTs). "
+             "Repeatable. Example: --upsample equation_numeric_guess:6 brings "
+             "86 base train rows to ~516. The first trace per problem uses "
+             "the original prompt; additional ones use deterministic shuffles "
+             "with id suffix '__p{i}'.",
+    )
+    ap.add_argument(
+        "--append-thk-suffix", action="store_true",
+        help="Append THK's `Please put your final answer inside \\boxed{}. "
+             "For example: \\boxed{your answer}` suffix to every reasoner "
+             "record's user prompt, matching THK's corpus.py. Set this when "
+             "the submission notebook + local eval also append the same "
+             "suffix (see baseline_generate.py --append-suffix and the "
+             "Kaggle submission notebook). NOT applied to augmenter records.",
+    )
     args = ap.parse_args()
+
+    upsample_map: dict[str, int] = {}
+    for spec in args.upsample:
+        if ":" not in spec:
+            raise SystemExit(f"--upsample expects CAT:K, got {spec!r}")
+        cat, k_str = spec.rsplit(":", 1)
+        k = int(k_str)
+        if k < 1:
+            raise SystemExit(f"--upsample K must be >= 1, got {k}")
+        upsample_map[cat] = k
 
     rows: list[dict] = []
     with open(args.classified, "r", encoding="utf-8") as f:
@@ -220,6 +300,9 @@ def main() -> None:
         cat_unknown = 0
         cat_wrong = 0
         cat_kept_wrong = 0
+        cat_upsampled = 0
+        cat_upsample_skips = 0
+        upsample_k = upsample_map.get(cat, 1)
         for r in train_items:
             problem = build_problem(r)
             try:
@@ -248,16 +331,74 @@ def main() -> None:
                 trace if args.no_thinking_wrap
                 else restructure_for_thinking(trace, boxed_target)
             )
+            user_content = r["prompt"]
+            if args.append_thk_suffix:
+                user_content = user_content + THK_PROMPT_SUFFIX
             train_records.append({
                 "id": r["id"],
                 "category": cat,
                 "messages": [
-                    {"role": "user", "content": r["prompt"]},
+                    {"role": "user", "content": user_content},
                     {"role": "assistant", "content": content},
                 ],
             })
             if is_correct:
                 cat_found += 1
+
+            if upsample_k > 1:
+                base_id = r["id"]
+                seen_prompts: set[str] = {r["prompt"]}
+                made = 0
+                attempt = 0
+                # Cap attempts so a problem with too-few examples (so the
+                # permutation space is exhausted) can't hang the loop.
+                while made < upsample_k - 1 and attempt < (upsample_k - 1) * 4:
+                    attempt += 1
+                    shuffled_prompt = shuffle_example_order(
+                        r["prompt"],
+                        seed=(args.seed ^ (hash(base_id) & 0xFFFFFFFF)) + attempt,
+                    )
+                    if shuffled_prompt is None or shuffled_prompt in seen_prompts:
+                        continue
+                    seen_prompts.add(shuffled_prompt)
+                    new_row = {**r, "prompt": shuffled_prompt}
+                    problem2 = build_problem(new_row)
+                    try:
+                        trace2 = gen(problem2)
+                    except Exception as e:
+                        print(f"[{cat}] {base_id}__p{made+1}: generator error: "
+                              f"{type(e).__name__}: {e}")
+                        cat_upsample_skips += 1
+                        continue
+                    if trace2 is None:
+                        cat_upsample_skips += 1
+                        continue
+                    reasoner_boxed2 = extract_boxed(trace2)
+                    is_correct2 = compare_answer(problem2.answer, reasoner_boxed2)
+                    if not is_correct2 and not args.keep_wrong_traces:
+                        cat_upsample_skips += 1
+                        continue
+                    if args.use_reasoner_boxed and reasoner_boxed2:
+                        boxed_target2 = reasoner_boxed2
+                    else:
+                        boxed_target2 = problem2.answer
+                    content2 = (
+                        trace2 if args.no_thinking_wrap
+                        else restructure_for_thinking(trace2, boxed_target2)
+                    )
+                    made += 1
+                    up_user_content = shuffled_prompt
+                    if args.append_thk_suffix:
+                        up_user_content = up_user_content + THK_PROMPT_SUFFIX
+                    train_records.append({
+                        "id": f"{base_id}__p{made}",
+                        "category": cat,
+                        "messages": [
+                            {"role": "user", "content": up_user_content},
+                            {"role": "assistant", "content": content2},
+                        ],
+                    })
+                    cat_upsampled += 1
 
         rule_found_total += cat_found
         rule_unknown_total += cat_unknown
@@ -265,11 +406,16 @@ def main() -> None:
         kept_wrong_note = (
             f", kept_wrong {cat_kept_wrong}" if cat_kept_wrong else ""
         )
+        upsample_note = (
+            f", upsampled +{cat_upsampled} (skipped {cat_upsample_skips})"
+            if upsample_k > 1 else ""
+        )
         denom = max(1, len(train_items))
         print(
             f"[{cat}] rule_found {cat_found}/{len(train_items)} "
             f"({100.0 * cat_found / denom:.1f}%); "
             f"unknown {cat_unknown}, wrong {cat_wrong}{kept_wrong_note}"
+            f"{upsample_note}"
         )
 
     # Interleave categories so SFT batches see a mix.

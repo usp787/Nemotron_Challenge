@@ -15,6 +15,15 @@ from pathlib import Path
 import yaml
 
 
+# THK's `PROMPT_SUFFIX` from nemotron-tonghuikang-source/corpus.py:38-41.
+# Kept verbatim so train-time (build_sft_traces.py --append-thk-suffix) and
+# inference-time prompts share a single source of truth.
+THK_PROMPT_SUFFIX = (
+    "\nPlease put your final answer inside `\\boxed{}`. "
+    "For example: `\\boxed{your answer}`"
+)
+
+
 def load_config(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -56,6 +65,10 @@ def main() -> None:
     model_cfg = cfg["model"]
     runtime_cfg = cfg["runtime"]
     data_cfg = cfg["data"]
+    # Mirror THK's submission-time prompt suffix when the eval config opts in.
+    # MUST be on whenever build_sft_traces.py was run with --append-thk-suffix
+    # (or the training distribution and inference distribution diverge).
+    append_suffix = bool(data_cfg.get("append_thk_suffix", False))
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,8 +127,11 @@ def main() -> None:
     failures = 0
     with open(out_path, "w", encoding="utf-8") as out:
         for item in prompts:
+            user_content = item["prompt"]
+            if append_suffix:
+                user_content = user_content + THK_PROMPT_SUFFIX
             formatted_prompt = tokenizer.apply_chat_template(
-                [{"role": "user", "content": item["prompt"]}],
+                [{"role": "user", "content": user_content}],
                 tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=True,

@@ -45,6 +45,14 @@ lora:
   alpha: 32
   dropout: 0.0
   target_modules: all-linear
+  # Full-rank fine-tuning of lm_head (the unembedding). Replicates THK's
+  # `train_unembed: true` (04-10-04-33 config.json). peft's "all-linear"
+  # excludes lm_head by design, so we have to opt it in here. Cost: adapter
+  # file grows by the lm_head matrix (~vocab*hidden bf16). On bit_manipulation
+  # the model emits long sequences of precisely-formatted 0/1 tokens, and
+  # without tuning the output projection the final-token distribution stays
+  # at base-model defaults — leading hypothesis for our 0.04 score there.
+  modules_to_save: [lm_head]
   bias: none
   task_type: CAUSAL_LM
 
