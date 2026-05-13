@@ -21,6 +21,10 @@ from pathlib import Path
 
 REQUIRED = {"adapter_config.json"}
 WEIGHT_NAMES = {"adapter_model.safetensors", "adapter_model.bin"}
+# training_state.pt is the path-beta resume payload (~7-10 GB of AdamW
+# optimizer state). Kaggle never reads it, so excluding it shrinks the
+# upload by ~10x. See docs/path_beta_runbook.md for what it's actually for.
+EXCLUDE = {"training_state.pt"}
 
 
 def main() -> None:
@@ -47,16 +51,25 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     written: list[str] = []
+    skipped: list[str] = []
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for p in sorted(adapter_dir.iterdir()):
-            if p.is_file():
-                zf.write(p, arcname=p.name)
-                written.append(p.name)
+            if not p.is_file():
+                continue
+            if p.name in EXCLUDE:
+                skipped.append(p.name)
+                continue
+            zf.write(p, arcname=p.name)
+            written.append(p.name)
 
     size_mb = out_path.stat().st_size / (1024 * 1024)
     print(f"Wrote {out_path} ({size_mb:.2f} MB) containing {len(written)} files:")
     for name in written:
         print(f"  - {name}")
+    if skipped:
+        print(f"Excluded {len(skipped)} file(s) (resume-only payload, not for Kaggle):")
+        for name in skipped:
+            print(f"  - {name}")
 
 
 if __name__ == "__main__":
