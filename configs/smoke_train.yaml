@@ -30,11 +30,12 @@ lora:
   r: 32                              # was 16, match THK
   alpha: 32
   dropout: 0.0
-  target_modules: all-linear
-  # Match train_thk_full.yaml so the smoke validates the exact LoRA shape
-  # that the production run uses. Adapter file grows by lm_head's full bf16
-  # weights — relevant for the smoke save check at line 18.
-  modules_to_save: [lm_head]
+  # Mirrors configs/train_thk_full.yaml: explicit list of all-linear-resolved
+  # modules + lm_head, applied as rank-32 LoRA. We do NOT use peft's
+  # `modules_to_save: [lm_head]` here — see train_thk_full.yaml for why
+  # (short: vLLM's LoRA loader can't read the full-rank tensor it produces,
+  # confirmed broken on Kaggle 2026-05-14).
+  target_modules: [v_proj, q_proj, in_proj, up_proj, out_proj, k_proj, down_proj, o_proj, lm_head]
   bias: none
   task_type: CAUSAL_LM
 

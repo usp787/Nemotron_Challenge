@@ -44,15 +44,34 @@ lora:
   r: 32
   alpha: 32
   dropout: 0.0
-  target_modules: all-linear
-  # Full-rank fine-tuning of lm_head (the unembedding). Replicates THK's
-  # `train_unembed: true` (04-10-04-33 config.json). peft's "all-linear"
-  # excludes lm_head by design, so we have to opt it in here. Cost: adapter
-  # file grows by the lm_head matrix (~vocab*hidden bf16). On bit_manipulation
-  # the model emits long sequences of precisely-formatted 0/1 tokens, and
-  # without tuning the output projection the final-token distribution stays
-  # at base-model defaults — leading hypothesis for our 0.04 score there.
-  modules_to_save: [lm_head]
+  # Explicit target_modules list = the 8 names peft's "all-linear" sentinel
+  # resolved to on this base model (verified in chunk3's adapter_config.json
+  # from the failed 2026-05-14 submission) PLUS lm_head.
+  #
+  # Why not `modules_to_save: [lm_head]` (the previous approach)?
+  #   peft's `modules_to_save` stores a FULL-RANK replacement weight for the
+  #   listed module under the key `...lm_head.modules_to_save.default.weight`.
+  #   vLLM's LoRA adapter loader (which Kaggle's hidden harness uses — see
+  #   [[kaggle_eval_contract]]) only understands the low-rank A/B
+  #   decomposition. With `modules_to_save` set, vLLM either rejects the
+  #   adapter_config.json or chokes on the full-rank tensor key — surfaced
+  #   to us on 2026-05-14 as "Evaluation metric raised an unexpected error"
+  #   on a 4.24 GB adapter_model.safetensors.
+  #
+  # Why this fixes it:
+  #   Adding `lm_head` to target_modules applies the same rank-32 LoRA
+  #   decomposition vLLM already loads for the other 8 modules. The output
+  #   projection still gets trained (the goal — bit_manipulation needs 0/1
+  #   token-bias correction; see [[milestone_2026-05-13]] Fix A), but as a
+  #   low-rank delta vLLM can apply. Adapter size drops from ~4.2 GB to a
+  #   few hundred MB.
+  #
+  # Trade-off vs THK's `train_unembed: true` (which is full-rank): we get
+  # a rank-32 approximation of the unembedding update, not the full thing.
+  # For a vocab-size output projection this is the closest vLLM-compatible
+  # equivalent; if results disappoint we can revisit (Option C in the
+  # 2026-05-14 diagnosis: strip lm_head from the existing adapter instead).
+  target_modules: [v_proj, q_proj, in_proj, up_proj, out_proj, k_proj, down_proj, o_proj, lm_head]
   bias: none
   task_type: CAUSAL_LM
 
