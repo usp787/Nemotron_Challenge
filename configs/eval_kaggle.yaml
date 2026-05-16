@@ -37,10 +37,11 @@ data:
   input_path: data/stratified_holdout.jsonl
   output_dir: outputs
   # Match THK's training+inference prompt shape. MUST stay aligned with
-  # build_sft_traces.py --append-thk-suffix used to build sft_traces.jsonl,
-  # otherwise the inference distribution diverges from training and per-
-  # category accuracy collapses on format-sensitive tasks (bit_manipulation,
-  # cryptarithm). Flip off only when you re-train without the suffix.
+  # build_sft_traces.py, which now appends the suffix by default for reasoner
+  # rows; otherwise the inference distribution diverges from training and
+  # per-category accuracy collapses on format-sensitive tasks
+  # (bit_manipulation, cryptarithm). Flip off only when you deliberately
+  # rebuild training data with --no-append-thk-suffix.
   append_thk_suffix: true
 
 logging:

@@ -22,7 +22,7 @@ Drop `train.max_steps: 300` once the dataset is enlarged.
 ## Data shape (decoded from sampled corpus segments)
 
 Every training example is `M-U` (one masked prompt segment, one unmasked completion segment):
-- **Reasoner records** (9 categories): user content includes the Kaggle `Please put your final answer inside \boxed{}` suffix; assistant content is `<think>\n<body>\n</think>\n\n\boxed{<answer>}`.
+- **Reasoner records** (9 categories): user content includes the Kaggle `Please put your final answer inside \boxed{}` suffix by default; assistant content is `<think>\n<body>\n</think>\n\n\boxed{<answer>}`.
 - **Augmenter records** (5 categories): user content has **no `\boxed{}` suffix**; assistant content is `<think>\n<output>\n</think>` (no `\boxed{}`).
 
 Both shapes pass through `apply_chat_template(messages, enable_thinking=True, add_generation_prompt=False)` correctly.
@@ -71,6 +71,7 @@ Both shapes pass through `apply_chat_template(messages, enable_thinking=True, ad
 
 Reasoner build:
 - [x] Updated `scripts/build_sft_traces.py` — added `--keep-wrong-traces` and `--use-reasoner-boxed` flags (both off = baseline behaviour, both on = matches THK 04-10-04-33)
+- [x] THK prompt suffix is now enabled by default for reasoner rows; use `--no-append-thk-suffix` only for an intentional ablation that also disables eval-time suffixing.
 - [x] Always emits `id` + `category` per record (needed by the matching augmenter)
 - [x] Run with `--keep-wrong-traces --use-reasoner-boxed --holdout 50`: **9,050 reasoner records** (matches THK's 9,500 minus our 450 holdout)
 

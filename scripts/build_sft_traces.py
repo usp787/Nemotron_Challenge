@@ -38,7 +38,7 @@ Use the ``compare_answer`` rules from the Kaggle metric:
 Usage (current baseline behaviour):
     python scripts/build_sft_traces.py
 
-Usage (matches THK's full-coverage corpus):
+Usage (matches THK's full-coverage corpus shape while keeping a local holdout):
     python scripts/build_sft_traces.py --keep-wrong-traces --use-reasoner-boxed --holdout 50
 
 Usage (THK corpus + upsample the data-starved category by shuffling
@@ -210,15 +210,25 @@ def main() -> None:
              "the original prompt; additional ones use deterministic shuffles "
              "with id suffix '__p{i}'.",
     )
-    ap.add_argument(
-        "--append-thk-suffix", action="store_true",
+    suffix_group = ap.add_mutually_exclusive_group()
+    suffix_group.add_argument(
+        "--append-thk-suffix",
+        dest="append_thk_suffix",
+        action="store_true",
         help="Append THK's `Please put your final answer inside \\boxed{}. "
              "For example: \\boxed{your answer}` suffix to every reasoner "
-             "record's user prompt, matching THK's corpus.py. Set this when "
-             "the submission notebook + local eval also append the same "
-             "suffix (see baseline_generate.py --append-suffix and the "
-             "Kaggle submission notebook). NOT applied to augmenter records.",
+             "record's user prompt, matching THK's corpus.py. This is now "
+             "the default because configs/eval_kaggle.yaml appends the same "
+             "suffix at inference time. NOT applied to augmenter records.",
     )
+    suffix_group.add_argument(
+        "--no-append-thk-suffix",
+        dest="append_thk_suffix",
+        action="store_false",
+        help="Deliberately omit THK's prompt suffix from reasoner records. "
+             "Use only for ablations where eval-time suffixing is also disabled.",
+    )
+    ap.set_defaults(append_thk_suffix=True)
     args = ap.parse_args()
 
     upsample_map: dict[str, int] = {}
