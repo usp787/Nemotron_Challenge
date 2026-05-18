@@ -45,6 +45,10 @@ Usage (THK corpus + upsample the data-starved category by shuffling
 example order; each shuffle produces a distinct reasoner CoT):
     python scripts/build_sft_traces.py --keep-wrong-traces --use-reasoner-boxed \\
         --holdout 50 --upsample equation_numeric_guess:6
+
+Usage (E3AB hard-category label repair):
+    python scripts/build_sft_traces.py --keep-wrong-traces --use-reasoner-boxed \\
+        --e3ab-hard-label-repair --holdout 0
 """
 from __future__ import annotations
 
@@ -75,6 +79,13 @@ THK_PROMPT_SUFFIX = (
     "\nPlease put your final answer inside `\\boxed{}`. "
     "For example: `\\boxed{your answer}`"
 )
+
+E3AB_HARD_LABEL_REPAIR_CATEGORIES = {
+    "bit_manipulation",
+    "cryptarithm_deduce",
+    "cryptarithm_guess",
+    "equation_numeric_guess",
+}
 
 
 def shuffle_example_order(prompt: str, seed: int) -> str | None:
@@ -169,6 +180,34 @@ def compare_answer(stored: str, predicted: str) -> bool:
         return predicted.lower() == stored.lower()
 
 
+def choose_boxed_target(
+    *,
+    category: str,
+    answer: str,
+    reasoner_boxed: str,
+    is_correct: bool,
+    use_reasoner_boxed: bool,
+    repair_categories: set[str],
+) -> tuple[str, bool]:
+    """Choose the final supervised boxed value and report label repair.
+
+    E2/THK behavior keeps the reasoner's own boxed value when requested, even
+    when it is wrong. E3AB keeps the same row and trace body, but rewrites the
+    final supervised box to ground truth for selected hard categories.
+    """
+    should_repair = (
+        use_reasoner_boxed
+        and bool(reasoner_boxed)
+        and category in repair_categories
+        and not is_correct
+    )
+    if should_repair:
+        return answer, True
+    if use_reasoner_boxed and reasoner_boxed:
+        return reasoner_boxed, False
+    return answer, False
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--classified", default="data/problems_classified.jsonl")
@@ -198,6 +237,14 @@ def main() -> None:
         help="Use the reasoner's own boxed value in the trained \\boxed{...} "
              "(rather than the ground-truth answer). Matches THK's "
              "04-10-04-33 behaviour. Default: rewrite to ground truth.",
+    )
+    ap.add_argument(
+        "--e3ab-hard-label-repair",
+        action="store_true",
+        help="Keep E2/THK row coverage, but for wrong-answer traces in "
+             "bit_manipulation, cryptarithm_deduce, cryptarithm_guess, and "
+             "equation_numeric_guess, rewrite the final trained \\boxed{...} "
+             "to ground truth. Intended for the E3AB score-seeking run.",
     )
     ap.add_argument(
         "--upsample", action="append", default=[],
@@ -230,6 +277,19 @@ def main() -> None:
     )
     ap.set_defaults(append_thk_suffix=True)
     args = ap.parse_args()
+
+    if args.e3ab_hard_label_repair and args.no_thinking_wrap:
+        raise SystemExit(
+            "--e3ab-hard-label-repair cannot be combined with "
+            "--no-thinking-wrap because raw traces would keep their original "
+            "boxed value."
+        )
+
+    hard_label_repair_categories = (
+        E3AB_HARD_LABEL_REPAIR_CATEGORIES
+        if args.e3ab_hard_label_repair
+        else set()
+    )
 
     upsample_map: dict[str, int] = {}
     for spec in args.upsample:
@@ -267,6 +327,7 @@ def main() -> None:
     rule_found_total = 0
     rule_unknown_total = 0
     wrong_answer_total = 0
+    label_repaired_total = 0
     no_generator_total = 0
 
     for cat in cats_to_process:
@@ -310,6 +371,7 @@ def main() -> None:
         cat_unknown = 0
         cat_wrong = 0
         cat_kept_wrong = 0
+        cat_label_repaired = 0
         cat_upsampled = 0
         cat_upsample_skips = 0
         upsample_k = upsample_map.get(cat, 1)
@@ -332,10 +394,16 @@ def main() -> None:
                 cat_kept_wrong += 1
 
             # Choose what value to put in the trained \boxed{...}.
-            if args.use_reasoner_boxed and reasoner_boxed:
-                boxed_target = reasoner_boxed
-            else:
-                boxed_target = problem.answer
+            boxed_target, label_repaired = choose_boxed_target(
+                category=cat,
+                answer=problem.answer,
+                reasoner_boxed=reasoner_boxed,
+                is_correct=is_correct,
+                use_reasoner_boxed=args.use_reasoner_boxed,
+                repair_categories=hard_label_repair_categories,
+            )
+            if label_repaired:
+                cat_label_repaired += 1
 
             content = (
                 trace if args.no_thinking_wrap
@@ -388,10 +456,16 @@ def main() -> None:
                     if not is_correct2 and not args.keep_wrong_traces:
                         cat_upsample_skips += 1
                         continue
-                    if args.use_reasoner_boxed and reasoner_boxed2:
-                        boxed_target2 = reasoner_boxed2
-                    else:
-                        boxed_target2 = problem2.answer
+                    boxed_target2, label_repaired2 = choose_boxed_target(
+                        category=cat,
+                        answer=problem2.answer,
+                        reasoner_boxed=reasoner_boxed2,
+                        is_correct=is_correct2,
+                        use_reasoner_boxed=args.use_reasoner_boxed,
+                        repair_categories=hard_label_repair_categories,
+                    )
+                    if label_repaired2:
+                        cat_label_repaired += 1
                     content2 = (
                         trace2 if args.no_thinking_wrap
                         else restructure_for_thinking(trace2, boxed_target2)
@@ -413,8 +487,13 @@ def main() -> None:
         rule_found_total += cat_found
         rule_unknown_total += cat_unknown
         wrong_answer_total += cat_wrong
+        label_repaired_total += cat_label_repaired
         kept_wrong_note = (
             f", kept_wrong {cat_kept_wrong}" if cat_kept_wrong else ""
+        )
+        repaired_note = (
+            f", label_repaired {cat_label_repaired}"
+            if cat_label_repaired else ""
         )
         upsample_note = (
             f", upsampled +{cat_upsampled} (skipped {cat_upsample_skips})"
@@ -425,7 +504,7 @@ def main() -> None:
             f"[{cat}] rule_found {cat_found}/{len(train_items)} "
             f"({100.0 * cat_found / denom:.1f}%); "
             f"unknown {cat_unknown}, wrong {cat_wrong}{kept_wrong_note}"
-            f"{upsample_note}"
+            f"{repaired_note}{upsample_note}"
         )
 
     # Interleave categories so SFT batches see a mix.
@@ -443,6 +522,10 @@ def main() -> None:
     if args.keep_wrong_traces:
         print(f"  kept-wrong (procedure only): "
               f"{len(train_records) - rule_found_total}")
+    if args.e3ab_hard_label_repair:
+        cats = ", ".join(sorted(hard_label_repair_categories))
+        print(f"  E3AB hard-label repaired boxes: {label_repaired_total}")
+        print(f"    categories: {cats}")
     print(f"Skipped (no generator): {no_generator_total}")
     print(f"Skipped (rule_unknown / generator returned None): {rule_unknown_total}")
     print(f"Skipped (wrong answer, dropped): {wrong_answer_total}")

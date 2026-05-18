@@ -107,3 +107,42 @@ Readout:
   recipe issue; move next to category-policy work.
 - If `E1` barely moves, the prompt mismatch was real but not decisive; the next
   work should still be category-policy work rather than more THK cloning.
+
+## E3AB - full corpus plus hard-category label repair
+
+Use after E2 has confirmed the suffix-on, full-corpus path. This keeps the E2
+row coverage and trace body policy, but rewrites wrong final boxed labels to
+ground truth for the hard categories only:
+
+- `bit_manipulation`
+- `cryptarithm_deduce`
+- `cryptarithm_guess`
+- `equation_numeric_guess`
+
+Build:
+
+```bash
+python3 scripts/build_sft_traces.py \
+  --keep-wrong-traces \
+  --use-reasoner-boxed \
+  --e3ab-hard-label-repair \
+  --holdout 0
+
+python3 scripts/build_augmenter_traces.py \
+  --matching-source data/sft_traces.jsonl
+
+python3 scripts/combine_traces.py
+```
+
+Expected intent:
+
+- `data/sft_traces.jsonl`: keep all `9,500` reasoner rows.
+- Hard-category wrong traces are not dropped.
+- Easy categories keep E2/THK `--use-reasoner-boxed` behavior.
+- The final supervised `\boxed{...}` is corrected only for wrong hard-category
+  rows.
+
+Train, evaluate, and package with the same E2 chunked route. Treat this as a
+score-seeking run: it intentionally combines corrected-label and hard-category
+policy repair, so it is less diagnostic than separate A/B runs but cheaper in
+GPU queue time.
