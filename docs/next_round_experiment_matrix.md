@@ -146,3 +146,52 @@ Train, evaluate, and package with the same E2 chunked route. Treat this as a
 score-seeking run: it intentionally combines corrected-label and hard-category
 policy repair, so it is less diagnostic than separate A/B runs but cheaper in
 GPU queue time.
+
+## E3C - full corpus plus hard-category clean traces
+
+Use after E3AB shows label repair alone is not enough. This keeps E2 row
+coverage, but for wrong traces in the hard categories, replaces the whole
+assistant trace body with a short clean target ending in the ground-truth
+`\boxed{...}`. Correct hard-category traces are kept unchanged, and easy
+categories keep E2/THK `--use-reasoner-boxed` behavior.
+
+Hard clean-trace categories:
+
+- `bit_manipulation`
+- `cryptarithm_deduce`
+- `cryptarithm_guess`
+- `equation_numeric_guess`
+
+Build:
+
+```bash
+python3 scripts/build_sft_traces.py \
+  --keep-wrong-traces \
+  --use-reasoner-boxed \
+  --e3c-hard-clean-trace \
+  --holdout 0
+
+PROJECT_DIR=$HOME/Nemotron_Challenge
+TRAIN_CONTAINER=$SCRATCH/containers/nemotron_vllm.sif
+LORA_PIP_DIR=$SCRATCH/lora_pip
+
+apptainer exec --bind "$PROJECT_DIR:/workspace" --bind "$SCRATCH:$SCRATCH" "$TRAIN_CONTAINER" bash -lc "cd /workspace && export PYTHONPATH=$LORA_PIP_DIR:\$PYTHONPATH && export HF_HOME=$SCRATCH/huggingface && export TRANSFORMERS_CACHE=$SCRATCH/huggingface && export HF_HUB_CACHE=$SCRATCH/huggingface/hub && export HF_HUB_OFFLINE=1 && export TRANSFORMERS_OFFLINE=1 && python3 scripts/build_augmenter_traces.py --matching-source data/sft_traces.jsonl"
+
+python3 scripts/combine_traces.py
+```
+
+Expected intent:
+
+- `data/sft_traces.jsonl`: keep all `9,500` reasoner rows.
+- Wrong hard-category rows are not dropped.
+- Wrong hard-category trace bodies are replaced by clean answer targets.
+- Wrong `bit_manipulation` rows preserve their original raw trace in a
+  `matching_source` side field so the `matching` augmenter can still recover
+  its section blocks.
+- `data/augmenter_traces.jsonl`: stays at `8,478` rows if spelling and matching
+  both load correctly.
+- `data/sft_combined.jsonl`: stays at `17,978` rows.
+
+Train, evaluate, and package with the same E2 chunked route. This is the next
+score-seeking run after E3AB; if it does not move Kaggle, switch to true solver
+repair for `cryptarithm_*` first.
