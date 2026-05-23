@@ -107,10 +107,8 @@ def _load_matching_source_from_sft_traces(path: Path) -> dict[str, str]:
                 user = rec.get("messages", [{}])[0].get("content", "")
                 if not user_re.search(user):
                     continue
-            trace = rec.get("matching_source")
-            if trace is None:
-                assistant = rec["messages"][1]["content"]
-                trace = _strip_thinking_wrapper(assistant)
+            assistant = rec["messages"][1]["content"]
+            trace = _strip_thinking_wrapper(assistant)
             pid = rec.get("id")
             if not pid:
                 pid = f"bm_{fallback_idx:06d}"
