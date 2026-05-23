@@ -25,7 +25,10 @@ classifier update in Phase 4 will start emitting the split keys; the
 combined keys remain registered as aliases so the current pipeline
 doesn't break in the meantime.
 """
-from .bit_manipulation import reasoning_bit_manipulation
+from .bit_manipulation import (
+    reasoning_bit_manipulation,
+    reasoning_bit_manipulation_compact,
+)
 from .cipher import reasoning_cipher
 from .cryptarithm import reasoning_cryptarithm
 from .equation_numeric import reasoning_equation_numeric
@@ -51,4 +54,20 @@ GENERATORS = {
     "unit_conversion": reasoning_unit_conversion,
 }
 
-__all__ = ["GENERATORS", "Example", "Problem", "build_problem"]
+# Compact-mode overrides: same keys as GENERATORS but with shorter traces
+# where available. Categories without a compact variant simply re-use the
+# verbose generator. build_sft_traces.py's --compact-bit-manipulation flag
+# swaps bit_manipulation to the compact entry; other categories use the
+# verbose generator as-is regardless of the flag.
+COMPACT_GENERATORS = {
+    **GENERATORS,
+    "bit_manipulation": reasoning_bit_manipulation_compact,
+}
+
+__all__ = [
+    "GENERATORS",
+    "COMPACT_GENERATORS",
+    "Example",
+    "Problem",
+    "build_problem",
+]

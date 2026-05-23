@@ -414,16 +414,26 @@ def reasoning_equation_numeric(problem: Problem) -> str | None:
     if q_match:
         lines.append(f"{problem.question} -> {q_op}")
 
-    # If question operator not in examples, fall back to most common example operator
+    # If question operator not in examples, inherit the rule from the
+    # example operator with the most statistical support. THK's recipe
+    # falls back to absolute difference here; we instead apply the *actual
+    # fitted rule* from the donor operator. Empirically this lifts the
+    # equation_numeric_guess solve rate from ~0% (forced abs-diff produces
+    # almost no matches) to ~1.5% (rare but real cross-op transfers).
+    # Net gain is small — most "guess" problems use rules outside our
+    # candidate space — but the move is strictly more informative than
+    # forcing a single hardcoded op.
     effective_q_op = q_op
+    cross_op_fallback = False
     if q_op is not None and q_op not in by_op and by_op:
         most_common_op = max(by_op, key=lambda op: len(by_op[op]))
         lines.append(
             f"The question operator is not found in the examples. "
-            f"Investigating the most common example operator 【{most_common_op}】 instead. "
-            f"We will use absolute difference for the question operator."
+            f"Inheriting the fitted rule from the most common example "
+            f"operator 【{most_common_op}】."
         )
         effective_q_op = most_common_op
+        cross_op_fallback = True
     elif q_op is not None and q_op in by_op:
         lines.append("The question operator is found in the examples.")
 
@@ -578,19 +588,24 @@ def reasoning_equation_numeric(problem: Problem) -> str | None:
     qa, qb = q_match.group(1), q_match.group(3)
     lines.append("")
     lines.append(f"Applying to {problem.question}:")
-    if effective_q_op != q_op:
+    if cross_op_fallback:
+        donor_rule = found_ops[effective_q_op]
         lines.append(
-            "  We recall that the question operator is not found in the examples. "
-            "We will use the absolute difference as the operator."
+            f"  Inheriting rule from operator 【{effective_q_op}】: "
+            f"{donor_rule.op_name}."
         )
-        abs_diff_op = FoundOp(
-            op_name="absolute difference",
-            rev_ops=False,
-            rev_res=False,
-            fmt=found_ops[effective_q_op].fmt,
+        # Re-target the donor rule's op_char to the question op so any
+        # symbol prefix/suffix logic uses the question's symbol, not the
+        # donor's. fmt is kept from the donor (we don't know the question's
+        # native format, so inherit it).
+        applied_rule = FoundOp(
+            op_name=donor_rule.op_name,
+            rev_ops=donor_rule.rev_ops,
+            rev_res=donor_rule.rev_res,
+            fmt=donor_rule.fmt,
             op_char=q_op or "",
         )
-        result_val, steps = _apply_op(abs_diff_op, qa, qb)
+        result_val, steps = _apply_op(applied_rule, qa, qb)
     else:
         result_val, steps = _apply_op(found_ops[effective_q_op], qa, qb)
     for step in steps:

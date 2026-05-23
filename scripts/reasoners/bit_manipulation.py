@@ -2,6 +2,16 @@
 
 The output follows the legacy trace style used by the existing reasoning files,
 with a strict-validity filter for candidate assignment vectors.
+
+Two emission modes:
+  - ``reasoning_bit_manipulation``: verbose enumeration mode (THK 04-10-04-33
+    parity). ~2900 chars / ~3300 tokens per trace.
+  - ``reasoning_bit_manipulation_compact``: condensed per-column rule fitting
+    plus an application block. ~600-900 chars / ~250-400 tokens. Intended
+    for rank-32 LoRA training where the verbose trace is too long for the
+    adapter capacity to clone (see [[milestone_2026-05-13]] for the
+    eval-time symptoms — eval generations exploding to 2x training length
+    and still producing wrong boxed answers).
 """
 
 from __future__ import annotations
@@ -1003,4 +1013,176 @@ def reasoning_bit_manipulation(problem: Problem) -> Optional[str]:
     lines.append("")
     _emit_apply(lines, question_bits, best)
 
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Compact mode — short trace targeted at rank-32 LoRA trainability.
+# ---------------------------------------------------------------------------
+
+
+def _find_rule_for_column(
+    out_col: str, input_columns: List[str], n_examples: int
+) -> Optional[RuleCandidate]:
+    """Find the simplest single-rule explanation for one output bit column.
+
+    Search order matches the section-priority used by the verbose reasoner
+    (Identity > NOT > Constant > AND > OR > XOR > AND-NOT > OR-NOT > XOR-NOT).
+    Returns the first candidate whose column equals `out_col` across all
+    examples, or None if no rule in our family list fits.
+    """
+    # Identity: input column i matches output column directly.
+    for i, col in enumerate(input_columns):
+        if col == out_col:
+            return RuleCandidate("I", i, None, f"I{i}")
+    # NOT: inverted input column matches.
+    for i, col in enumerate(input_columns):
+        if _invert(col) == out_col:
+            return RuleCandidate("NOT", i, None, f"NOT{i}")
+    # Constant 0 / 1.
+    if out_col == "0" * n_examples:
+        return RuleCandidate("0", None, None, "C0")
+    if out_col == "1" * n_examples:
+        return RuleCandidate("1", None, None, "C1")
+    # Symmetric pairs.
+    for fam in SYM_FAMILIES:
+        for a in range(N_BITS):
+            for b in range(a + 1, N_BITS):
+                if _apply_family(input_columns[a], input_columns[b], fam) == out_col:
+                    return RuleCandidate(fam, a, b, f"{fam}{a}{b}")
+    # Asymmetric pairs (X NOT-OP Y where Y is the inverted operand).
+    for fam in ASYM_FAMILIES:
+        for a in range(N_BITS):
+            for b in range(N_BITS):
+                if a == b:
+                    continue
+                col = _apply_family(
+                    input_columns[a], input_columns[b], fam, invert_second=True
+                )
+                if col == out_col:
+                    return RuleCandidate(fam, a, b, f"{fam}{a}{b}")
+    return None
+
+
+def _rule_short(rule: RuleCandidate) -> str:
+    """One-token-friendly rule description, e.g. 'I3' / 'NOT5' / 'XOR04' / 'C1'."""
+    if rule.family == DEFAULT_FAMILY:
+        return "default 1"
+    if rule.family in ("I", "NOT"):
+        return f"{rule.family}{rule.primary}"
+    if rule.family in CONSTANT_FAMILIES:
+        return f"C{rule.family}"
+    if rule.family in PAIR_FAMILIES:
+        return f"{rule.family}({rule.primary},{rule.secondary})"
+    return rule.family
+
+
+def _apply_rule_explain(rule: RuleCandidate, qbits: str) -> Tuple[str, str]:
+    """Return (result_bit, one-line derivation) for applying rule to question."""
+    if rule.family == DEFAULT_FAMILY:
+        return "1", "default 1: no rule fit this column; emit 1"
+    if rule.family == "I":
+        v = qbits[rule.primary]
+        return v, f"I{rule.primary}: in[{rule.primary}] = {v}"
+    if rule.family == "NOT":
+        v = qbits[rule.primary]
+        n = _bit_not(v)
+        return n, f"NOT{rule.primary}: NOT(in[{rule.primary}]) = NOT({v}) = {n}"
+    if rule.family in CONSTANT_FAMILIES:
+        return rule.family, f"C{rule.family}: constant {rule.family}"
+    if rule.family in SYM_FAMILIES:
+        a = qbits[rule.primary]
+        b = qbits[rule.secondary]
+        r = _evaluate_binary(a, b, rule.family)
+        return r, (
+            f"{rule.family}({rule.primary},{rule.secondary}): "
+            f"{rule.family}({a},{b}) = {r}"
+        )
+    # Asymmetric "X NOT-OP Y" — second operand inverted.
+    a = qbits[rule.primary]
+    b_raw = qbits[rule.secondary]
+    b_inv = _bit_not(b_raw)
+    base = rule.family.split("-")[0]
+    r = _evaluate_binary(a, b_inv, base)
+    return r, (
+        f"{rule.family}({rule.primary},{rule.secondary}): "
+        f"{base}({a},NOT({b_raw})) = {base}({a},{b_inv}) = {r}"
+    )
+
+
+def reasoning_bit_manipulation_compact(problem: Problem) -> Optional[str]:
+    """Compact column-by-column rule fitting and answer derivation.
+
+    Produces ~600-900 character traces (vs the verbose reasoner's ~9000)
+    so a rank-32 LoRA adapter can plausibly clone the structure.
+
+    Returns None if any output bit cannot be explained by a single rule
+    in {I, NOT, C0, C1, AND, OR, XOR, AND-NOT, OR-NOT, XOR-NOT}, which is
+    the same family set the verbose reasoner uses. Empirically this fits
+    the vast majority of bit_manipulation problems in the training corpus.
+    """
+    inputs: List[str] = []
+    outputs: List[str] = []
+    for ex in problem.examples:
+        inp = _normalize_bits(ex.input_value)
+        out = _normalize_bits(ex.output_value)
+        if len(inp) == N_BITS and len(out) == N_BITS:
+            inputs.append(inp)
+            outputs.append(out)
+    if not inputs:
+        return None
+    question_bits = _normalize_bits(problem.question)
+    if not question_bits or len(question_bits) != N_BITS:
+        return None
+
+    n_examples = len(inputs)
+    output_columns = [_column_bits(outputs, i) for i in range(N_BITS)]
+    input_columns = [_column_bits(inputs, i) for i in range(N_BITS)]
+
+    # Per-bit rule fitting. Bits we can't fit get the DEFAULT rule (constant 1),
+    # mirroring the verbose reasoner's `default_cand`. This is the only way
+    # to handle problems where some columns aren't single-rule explainable
+    # without dropping the whole problem.
+    default_cand = RuleCandidate(DEFAULT_FAMILY, None, None, "default 1")
+    rules: List[RuleCandidate] = []
+    for bit in range(N_BITS):
+        rule = _find_rule_for_column(output_columns[bit], input_columns, n_examples)
+        rules.append(rule if rule is not None else default_cand)
+    # If literally nothing fit, the reasoner can't say anything meaningful.
+    if all(r.family == DEFAULT_FAMILY for r in rules):
+        return None
+
+    lines: List[str] = []
+    lines.append(
+        "We need to deduce the bit-wise transformation from the examples."
+    )
+    lines.append("I will put my final answer inside \\boxed{}.")
+    lines.append("")
+    lines.append("Examples (input -> output):")
+    for inp, out in zip(inputs, outputs):
+        lines.append(f"  {inp} -> {out}")
+    lines.append("")
+    lines.append("Read each output bit column top-to-bottom across the examples:")
+    for bit in range(N_BITS):
+        lines.append(f"  out_bit[{bit}] = {output_columns[bit]}")
+    lines.append("")
+    lines.append("Input bit columns (same reading):")
+    for bit in range(N_BITS):
+        lines.append(f"  in_bit[{bit}]  = {input_columns[bit]}")
+    lines.append("")
+    lines.append("Fit a rule to each output bit:")
+    for bit, rule in enumerate(rules):
+        lines.append(f"  out_bit[{bit}] = {_rule_short(rule)}")
+    lines.append("")
+    lines.append(f"Apply the rules to the question input {question_bits}:")
+    answer_bits: List[str] = []
+    for bit, rule in enumerate(rules):
+        result, deriv = _apply_rule_explain(rule, question_bits)
+        lines.append(f"  bit {bit}: {deriv}")
+        answer_bits.append(result)
+    answer = "".join(answer_bits)
+    lines.append("")
+    lines.append(f"Concatenating the bits gives {answer}.")
+    lines.append("I will now return the answer in \\boxed{}")
+    lines.append(f"The answer in \\boxed{{–}} is \\boxed{{{answer}}}")
     return "\n".join(lines)

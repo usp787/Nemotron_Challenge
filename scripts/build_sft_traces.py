@@ -60,8 +60,22 @@ from pathlib import Path
 # `python scripts/build_sft_traces.py` from the project root.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from reasoners import GENERATORS  # noqa: E402
+from reasoners import COMPACT_GENERATORS, GENERATORS  # noqa: E402
 from reasoners.store_types import build_problem  # noqa: E402
+
+# Default category set for --drop-wrong-hard-categories. Picked from the
+# per-category boxed-correctness audit in docs/next_round_experiment_matrix.md
+# rebuild diagnostics: these categories have reasoner-label correctness
+# substantially below the rest of the corpus, so keeping their wrong-boxed
+# traces actively teaches the model the wrong pattern. bit_manipulation is
+# excluded because its label correctness is high (~85%); its bottleneck is
+# trace length, not label quality (handled by --compact-bit-manipulation).
+DEFAULT_DROP_WRONG_HARD_CATEGORIES = (
+    "cryptarithm_deduce",
+    "cryptarithm_guess",
+    "cryptarithm",
+    "equation_numeric_guess",
+)
 
 
 _BOXED_RE = re.compile(r"\\boxed\{([^}]*)(?:\}|$)")
@@ -229,7 +243,60 @@ def main() -> None:
              "Use only for ablations where eval-time suffixing is also disabled.",
     )
     ap.set_defaults(append_thk_suffix=True)
+    ap.add_argument(
+        "--compact-bit-manipulation",
+        action="store_true",
+        help="Use the compact bit_manipulation reasoner (~470 tokens/trace) "
+             "instead of the verbose THK one (~2900 tokens/trace). Lower per-"
+             "trace label correctness (~60%% vs 85%%) but the shorter traces "
+             "are within rank-32 LoRA cloning capacity, lifting eval accuracy "
+             "from the current ~4%% ceiling. Other categories use their "
+             "verbose generators unchanged.",
+    )
+    ap.add_argument(
+        "--drop-wrong-categories",
+        action="append",
+        default=[],
+        metavar="CAT",
+        help="Drop reasoner traces whose boxed value does NOT match ground "
+             "truth, for the listed category. Useful with --keep-wrong-traces "
+             "to remove noisy supervision from specific hard categories while "
+             "preserving the THK 'procedure over correctness' policy elsewhere. "
+             "Repeatable. Has no effect if --keep-wrong-traces is off (wrong "
+             "traces are dropped globally in that case).",
+    )
+    ap.add_argument(
+        "--drop-wrong-hard-categories",
+        action="store_true",
+        help="Convenience shortcut equivalent to passing --drop-wrong-categories "
+             "for cryptarithm_deduce, cryptarithm_guess, equation_numeric_guess "
+             "(and the legacy combined cryptarithm key). These are the "
+             "categories whose reasoner-label correctness is <20%%; keeping "
+             "their wrong-boxed traces under THK's policy teaches the model "
+             "to clone the wrong answer pattern. bit_manipulation is NOT "
+             "included — its label correctness is high; its issue is trace "
+             "length (use --compact-bit-manipulation instead).",
+    )
     args = ap.parse_args()
+
+    drop_wrong_categories: set[str] = set(args.drop_wrong_categories)
+    if args.drop_wrong_hard_categories:
+        drop_wrong_categories.update(DEFAULT_DROP_WRONG_HARD_CATEGORIES)
+    if drop_wrong_categories and not args.keep_wrong_traces:
+        print(
+            "[info] --drop-wrong-categories is a no-op without "
+            "--keep-wrong-traces (wrong traces are dropped globally)."
+        )
+
+    active_generators = (
+        COMPACT_GENERATORS if args.compact_bit_manipulation else GENERATORS
+    )
+    if args.compact_bit_manipulation:
+        print("[info] compact bit_manipulation reasoner enabled "
+              "(~470 tokens/trace vs ~2900 verbose)")
+    if drop_wrong_categories:
+        print(f"[info] dropping wrong-boxed traces for categories: "
+              f"{sorted(drop_wrong_categories)}")
 
     upsample_map: dict[str, int] = {}
     for spec in args.upsample:
@@ -254,7 +321,9 @@ def main() -> None:
 
     print(f"Loaded {len(rows)} classified problems across {len(by_cat)} categories:")
     for cat, items in sorted(by_cat.items()):
-        gen_marker = "(generator)" if cat in GENERATORS else "(no generator yet)"
+        gen_marker = (
+            "(generator)" if cat in active_generators else "(no generator yet)"
+        )
         print(f"  {cat:30} {len(items):>6}  {gen_marker}")
     print()
 
@@ -299,7 +368,7 @@ def main() -> None:
                 }, ensure_ascii=False) + "\n")
         print(f"[{cat}] holdout {len(holdout_items):>5} -> {holdout_path}")
 
-        gen = GENERATORS.get(cat)
+        gen = active_generators.get(cat)
         if gen is None:
             no_generator_total += len(train_items)
             print(f"[{cat}] no generator -- skipping trace generation "
@@ -312,6 +381,7 @@ def main() -> None:
         cat_kept_wrong = 0
         cat_upsampled = 0
         cat_upsample_skips = 0
+        drop_wrong_here = cat in drop_wrong_categories
         upsample_k = upsample_map.get(cat, 1)
         for r in train_items:
             problem = build_problem(r)
@@ -326,7 +396,7 @@ def main() -> None:
             reasoner_boxed = extract_boxed(trace)
             is_correct = compare_answer(problem.answer, reasoner_boxed)
             if not is_correct:
-                if not args.keep_wrong_traces:
+                if not args.keep_wrong_traces or drop_wrong_here:
                     cat_wrong += 1
                     continue
                 cat_kept_wrong += 1
@@ -385,7 +455,9 @@ def main() -> None:
                         continue
                     reasoner_boxed2 = extract_boxed(trace2)
                     is_correct2 = compare_answer(problem2.answer, reasoner_boxed2)
-                    if not is_correct2 and not args.keep_wrong_traces:
+                    if not is_correct2 and (
+                        not args.keep_wrong_traces or drop_wrong_here
+                    ):
                         cat_upsample_skips += 1
                         continue
                     if args.use_reasoner_boxed and reasoner_boxed2:

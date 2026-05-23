@@ -1,12 +1,22 @@
 """Equation symbolic reasoning generator.
 
-Currently handles concatenation operators only (forward and reverse).
-Operates directly on the original symbols without letter assignment.
+Default behaviour (THK 04-10-04-33 parity) handles concatenation operators
+only — forward (LHS + RHS) and reverse (RHS + LHS). Operates directly on
+the original symbols without letter assignment.
+
+Extended hypothesis search: when concat doesn't fit, the reasoner now
+also tries position-permutation rules — every non-empty subset of input
+positions {0,1,2,3,4} with every ordering. Empirically this lifts the
+boxed-correctness rate on cryptarithm_deduce from ~8.0% to ~9.4% (the
+extra 1.4% picks up problems whose hidden rule is a positional projection
+like "keep chars 0,3,4 in that order"). cryptarithm_guess remains close
+to 0% solvable by simple rules; see the rebuild diagnostics doc.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations, permutations
 
 from .store_types import Problem
 
@@ -17,6 +27,68 @@ class _Ex:
     op: str
     b: tuple[str, str]
     out: str
+
+
+_ALL_POSITIONS = (0, 1, 2, 3, 4)
+# All non-empty position permutations of {0..4}. 5+5*4+5*4*3+5*4*3*2+5! = 325
+# orderings. Precomputed at import time so the inner loop stays tight.
+_POSITION_PERMS: tuple[tuple[int, ...], ...] = tuple(
+    perm
+    for r in range(1, 6)
+    for combo in combinations(_ALL_POSITIONS, r)
+    for perm in permutations(combo)
+)
+
+
+def _apply_perm(inp: str, perm: tuple[int, ...]) -> str:
+    """Apply a position permutation to a 5-char cryptarithm input."""
+    return "".join(inp[i] for i in perm)
+
+
+def _perm_label(perm: tuple[int, ...]) -> str:
+    """Human-readable rule label, e.g. 'LHS' / 'RHS' / 'drop-op' / 'pos[0,3,4]'."""
+    canonical = {
+        (0, 1, 3, 4): "drop-operator",
+        (3, 4, 0, 1): "reverse halves",
+        (0, 1): "LHS",
+        (3, 4): "RHS",
+        (1, 0): "reversed LHS",
+        (4, 3): "reversed RHS",
+        (4, 3, 1, 0): "fully reversed (op dropped)",
+        (4, 3, 2, 1, 0): "fully reversed",
+        (0, 1, 2, 3, 4): "identity",
+    }
+    if perm in canonical:
+        return canonical[perm]
+    return "positions[" + ",".join(str(i) for i in perm) + "]"
+
+
+def _find_perm_rule(exs: list[_Ex]) -> tuple[int, ...] | None:
+    """Find a position perm that maps each example's input to its output.
+
+    Returns the first matching perm in canonical search order (LHS-first,
+    drop-op, reverse halves, then arbitrary perms). Returns None if no
+    single perm fits all examples — including the trivial case where the
+    outputs across examples vary in length.
+    """
+    if not exs:
+        return None
+    expected_len = len(exs[0].out)
+    if any(len(ex.out) != expected_len for ex in exs):
+        # Variable-length outputs can't be a single position perm.
+        return None
+    if expected_len < 1 or expected_len > 5:
+        return None
+    # Reconstruct the original 5-char inputs from the parsed (a, op, b) shape.
+    inputs = [
+        ex.a[0] + ex.a[1] + ex.op + ex.b[0] + ex.b[1] for ex in exs
+    ]
+    for perm in _POSITION_PERMS:
+        if len(perm) != expected_len:
+            continue
+        if all(_apply_perm(inp, perm) == ex.out for inp, ex in zip(inputs, exs)):
+            return perm
+    return None
 
 
 def _concat_type(exs: list[_Ex]) -> str | None:
@@ -72,15 +144,48 @@ def reasoning_cryptarithm(problem: Problem) -> str | None:
         if ct is not None:
             concat_types[op] = ct
 
-    # Check question operator for concatenation type (default to fwd if unknown)
-    if q_op in by_op:
-        q_ct = _concat_type(by_op[q_op])
-        if q_ct is None:
-            q_ct = "fwd"
+    # Position-permutation fallback. For each operator whose examples don't
+    # follow a simple fwd/rev concat, search the position-perm space for a
+    # single perm that maps every input to its output. When found, treat it
+    # as the rule for that operator. Position perms can produce outputs of
+    # any length from 1 to 5, which is the actual format range in the data.
+    perm_rules: dict[str, tuple[int, ...]] = {}
+    for op, op_exs in by_op.items():
+        if op in concat_types:
+            continue
+        perm = _find_perm_rule(op_exs)
+        if perm is not None:
+            perm_rules[op] = perm
+
+    # Resolve the question's rule, in priority order:
+    #   1. concat rule for q_op
+    #   2. position-perm rule for q_op (only when q_op has its own examples)
+    #   3. fall back to forward concat (THK default)
+    #
+    # NOTE: an earlier draft also inherited perm rules cross-operator when
+    # q_op was absent from examples. Diagnostics showed this slightly hurt
+    # cryptarithm_guess (-4 problems / 164) because the "donor" op's perm
+    # rarely transfers to the question op; the resulting wrong answer
+    # displaced the lucky fwd-concat default that happened to match. We
+    # keep cross-op inheritance OFF and rely on --drop-wrong-hard-categories
+    # in build_sft_traces.py to remove the wrong traces instead.
+    q_input = q_a[0] + q_a[1] + q_op + q_b[0] + q_b[1]
+    q_ct: str | None = None
+    q_perm: tuple[int, ...] | None = None
+    q_rule_source: str = ""
+    if q_op in concat_types:
+        q_ct = concat_types[q_op]
+        q_rule_source = f"concat({q_ct})"
+    elif q_op in perm_rules:
+        q_perm = perm_rules[q_op]
+        q_rule_source = f"perm {_perm_label(q_perm)}"
     else:
         q_ct = "fwd"
+        q_rule_source = "concat(fwd) default"
 
-    if q_ct == "fwd":
+    if q_perm is not None:
+        answer = _apply_perm(q_input, q_perm)
+    elif q_ct == "fwd":
         answer = q_a[0] + q_a[1] + q_b[0] + q_b[1]
     else:
         answer = q_b[0] + q_b[1] + q_a[0] + q_a[1]
@@ -130,9 +235,6 @@ def reasoning_cryptarithm(problem: Problem) -> str | None:
         lines.append("")
 
     # Apply to question
-    q_op_known = q_op in concat_types
-    op_label = "concatenation" if q_ct == "fwd" else "reverse concatenation"
-
     qa0, qa1 = quote(q_a[0]), quote(q_a[1])
     qb0, qb1 = quote(q_b[0]), quote(q_b[1])
     q_orig = str(problem.question)
@@ -143,20 +245,19 @@ def reasoning_cryptarithm(problem: Problem) -> str | None:
     lines.append(f"  right:{qb0}{qb1}")
     lines.append("")
 
-    if q_op_known:
-        lines.append(
-            f"The question operator is {quote(q_op)}, which is {op_label}."
-        )
-    else:
-        lines.append(f"The question operator is {quote(q_op)}, which is unknown.")
-        lines.append(
-            "As the question operator is unknown, we default to concatenation."
-        )
-    lines.append("")
+    lines.append(f"The question operator is {quote(q_op)}. Rule: {q_rule_source}.")
 
-    lines.append(
-        f"  {op_label}({qa0}{qa1}, {qb0}{qb1}) = {_box(answer)}"
-    )
+    if q_perm is not None:
+        # Position-perm trace: enumerate positions and the chars taken.
+        picked = ", ".join(
+            f"pos {p} = {quote(q_input[p])}" for p in q_perm
+        )
+        lines.append(f"  picking ({picked}) -> {_box(answer)}")
+    else:
+        op_label = "concatenation" if q_ct == "fwd" else "reverse concatenation"
+        lines.append(
+            f"  {op_label}({qa0}{qa1}, {qb0}{qb1}) = {_box(answer)}"
+        )
     lines.append(f"  output: {quote(answer)}-> {quote('{' + answer + '}')}")
     lines.append("")
     lines.append("I will now return the answer in \\boxed{}")
