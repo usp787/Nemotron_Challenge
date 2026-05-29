@@ -44,9 +44,13 @@ lora:
   r: 32
   alpha: 32
   dropout: 0.0
-  # Explicit target_modules list = the 8 names peft's "all-linear" sentinel
-  # resolved to on this base model (verified in chunk3's adapter_config.json
-  # from the failed 2026-05-14 submission) PLUS lm_head.
+  # target_modules: see the long rationale further down. Short version: the
+  # 9 canonical names that peft's "all-linear" sentinel resolved to on this
+  # base model (8 attention/Mamba projections + lm_head), PLUS candidate
+  # SwiGLU-MoE expert names that the original "all-linear" resolution may
+  # have missed. peft applies LoRA only to modules whose name actually
+  # matches one of these; names that don't match any module are silently
+  # skipped, so adding candidates is safe.
   #
   # Why not `modules_to_save: [lm_head]` (the previous approach)?
   #   peft's `modules_to_save` stores a FULL-RANK replacement weight for the
@@ -58,7 +62,7 @@ lora:
   #   to us on 2026-05-14 as "Evaluation metric raised an unexpected error"
   #   on a 4.24 GB adapter_model.safetensors.
   #
-  # Why this fixes it:
+  # Why `lm_head` is in target_modules instead:
   #   Adding `lm_head` to target_modules applies the same rank-32 LoRA
   #   decomposition vLLM already loads for the other 8 modules. The output
   #   projection still gets trained (the goal — bit_manipulation needs 0/1
@@ -66,12 +70,49 @@ lora:
   #   low-rank delta vLLM can apply. Adapter size drops from ~4.2 GB to a
   #   few hundred MB.
   #
-  # Trade-off vs THK's `train_unembed: true` (which is full-rank): we get
-  # a rank-32 approximation of the unembedding update, not the full thing.
-  # For a vocab-size output projection this is the closest vLLM-compatible
-  # equivalent; if results disappoint we can revisit (Option C in the
-  # 2026-05-14 diagnosis: strip lm_head from the existing adapter instead).
-  target_modules: [v_proj, q_proj, in_proj, up_proj, out_proj, k_proj, down_proj, o_proj, lm_head]
+  # Why the additional SwiGLU/MoE candidates:
+  #   The 2026-05-28 eval log (job 7146818) shows vLLM 0.20.0 reports
+  #   "MoE model detected. Using fused MoE LoRA implementation." So MoE
+  #   expert LoRA *is* being loaded — `up_proj` and `down_proj` in the
+  #   explicit list are matching expert layers (~128 experts per MoE
+  #   block × hybrid-Mamba block count), not just dense MLP. What's
+  #   potentially MISSING is the third SwiGLU projection (`gate_proj`),
+  #   plus alternative HF naming conventions (`w1`/`w2`/`w3` for Mixtral-
+  #   style; `gate_up_proj` for some Llama variants). Listing the
+  #   candidates lets peft pick up any that actually exist in this
+  #   base model without forcing a full `target_modules="all-linear"`
+  #   re-resolve (which excludes lm_head by design).
+  #
+  # Verification post-training: train_lora.py:332 calls
+  # model.print_trainable_parameters(). Compare the trainable count vs
+  # the previous chunk3 run — a meaningful jump (~30-50%) confirms one
+  # of the new candidate names matched a real module.
+  #
+  # Trade-off vs THK's `train_unembed: true` (which is full-rank): we
+  # still get a rank-32 approximation of the unembedding update, not
+  # the full thing. That remains the structural ceiling on a vLLM-LoRA
+  # eval contract.
+  target_modules:
+    # Confirmed-matching names from chunk3's adapter_config.json:
+    - v_proj
+    - q_proj
+    - k_proj
+    - o_proj         # attention output
+    - in_proj        # Mamba input projection
+    - out_proj       # Mamba output projection
+    - up_proj        # MoE/MLP up projection (already matches MoE experts)
+    - down_proj      # MoE/MLP down projection (already matches MoE experts)
+    - lm_head        # output projection (rank-32 surrogate for train_unembed)
+    # Candidate names — added 2026-05-28. peft silently skips names that
+    # don't match any module, so these are safe to include even if the
+    # base model doesn't use them.
+    - gate_proj      # SwiGLU MoE expert gate projection — likely candidate
+    - w1             # Mixtral-style MoE expert gate
+    - w2             # Mixtral-style MoE expert down
+    - w3             # Mixtral-style MoE expert up
+    - gate_up_proj   # Llama-style fused gate+up
+    - dt_proj        # Mamba-2 delta-time projection
+    - x_proj         # Mamba SSM state projection
   bias: none
   task_type: CAUSAL_LM
 

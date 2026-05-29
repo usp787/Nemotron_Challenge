@@ -30,12 +30,30 @@ lora:
   r: 32                              # was 16, match THK
   alpha: 32
   dropout: 0.0
-  # Mirrors configs/train_thk_full.yaml: explicit list of all-linear-resolved
-  # modules + lm_head, applied as rank-32 LoRA. We do NOT use peft's
-  # `modules_to_save: [lm_head]` here — see train_thk_full.yaml for why
-  # (short: vLLM's LoRA loader can't read the full-rank tensor it produces,
-  # confirmed broken on Kaggle 2026-05-14).
-  target_modules: [v_proj, q_proj, in_proj, up_proj, out_proj, k_proj, down_proj, o_proj, lm_head]
+  # Mirrors configs/train_thk_full.yaml: confirmed all-linear-resolved
+  # modules + lm_head + SwiGLU/MoE expert candidate names. peft silently
+  # skips names that don't match any module; the candidates exist to
+  # opportunistically pick up `gate_proj` (MoE SwiGLU gate) and similar
+  # if the base model uses them. See train_thk_full.yaml for the full
+  # rationale and the 2026-05-28 eval log evidence that MoE LoRA is
+  # already loading (so adding the gate projection is the gap to close).
+  target_modules:
+    - v_proj
+    - q_proj
+    - k_proj
+    - o_proj
+    - in_proj
+    - out_proj
+    - up_proj
+    - down_proj
+    - lm_head
+    - gate_proj
+    - w1
+    - w2
+    - w3
+    - gate_up_proj
+    - dt_proj
+    - x_proj
   bias: none
   task_type: CAUSAL_LM
 
