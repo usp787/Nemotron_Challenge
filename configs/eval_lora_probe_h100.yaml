@@ -1,0 +1,37 @@
+# One-prompt LoRA load probe — H100 80 GB variant for the `sharing` partition.
+#
+# Same probe shape as configs/eval_lora_probe.yaml. The only delta is
+# `gpu_memory_utilization`: H100 has ~80 GB vs H200's 143 GB. At 0.85,
+# the H100's effective budget is ~68 GB, and the base model alone takes
+# 60.6 GB. Add the ~4 GB LoRA adapter and there's no room left for the
+# KV cache pool + CUDA graph buffers. Bumping to 0.92 leaves ~8 GB
+# headroom which is comfortable for max_num_seqs=1 / max_model_len=8192.
+
+model:
+  name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  dtype: bfloat16
+  max_model_len: 8192
+  max_tokens: 64
+  temperature: 0.0
+  top_p: 1.0
+  trust_remote_code: true
+
+runtime:
+  backend: vllm
+  gpu_memory_utilization: 0.92
+  tensor_parallel_size: 1
+  max_num_seqs: 1
+  lora:
+    enabled: true
+    path: outputs/lora_adapter
+    max_lora_rank: 32
+    max_loras: 1
+
+data:
+  input_path: data/lora_probe_prompt.jsonl
+  output_dir: outputs
+
+logging:
+  save_prompt: true
+  save_latency: true
+  save_errors: true
