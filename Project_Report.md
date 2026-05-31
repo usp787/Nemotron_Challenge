@@ -1,172 +1,306 @@
 # Project Report
 
-|  |  |
+## Executive Summary
+
+| Item | Current record |
 | --- | --- |
-| **Period** | 2026-04-27 to 2026-05-31 (~5 weeks) |
-| **Final Kaggle leaderboard** | **0.74** |
-| **Reference open-source ceiling** | 0.85 (THK / huikang, `end-to-end-finetuning-for-lb-0-85`) |
-| **Final structural gap to reference** | ~0.11, traced to a single Kaggle eval-contract constraint that no in-repo work can close |
+| Period | 2026-04-27 to 2026-05-31, about 5 weeks |
+| Target model | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` |
+| Final Kaggle raw leaderboard score | **0.74** |
+| Reference open-source score | 0.85, THK / huikang `end-to-end-finetuning-for-lb-0-85` |
+| Current interpretation | 0.74 is the best outcome reached so far under the tested vLLM-LoRA route and the ablations/operations described below |
+| Evidence policy | Kaggle exposes only the raw score. Large adapters live on the cluster and are not committed because they are several GB. The final local eval log should be attached manually when available. |
+
+This report is a retrospective of what the project has shown so far, not a claim
+that every possible route has been exhausted. The strongest conclusion is
+operational: within the tested Kaggle-compatible vLLM LoRA workflow, gains came
+from data shape, prompt/eval alignment, and hard-category trace policy; additional
+adapter capacity did not improve the final score.
+
+The project reached **0.74** on Kaggle after moving from a first algorithmic-CoT
+LoRA at 0.53 through a THK-style reproduction and then hard-category repairs.
+The remaining gap to the 0.85 reference is best explained by the combination of
+tested constraints: the public vLLM LoRA path cannot use THK-style full-rank
+`lm_head` / `train_unembed` updates, some "guess" categories have low reasoner
+label correctness, and a larger MoE/Mamba target-module adapter overfit rather
+than improving generalization in the tested run.
 
 ---
 
-## 1. Project Goal and the Eval Contract
+## Big-Picture Pipeline
 
-The challenge is to improve `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`'s reasoning behavior on a hidden 9-category test set under tight evaluation constraints:
+The current project path is:
 
-- **Inference** — vLLM-only with `max_lora_rank ≤ 32`, `max_model_len = 8192`, `max_tokens = 7680`, `temperature = 0.0` (greedy)
-- **Adapter** — must be a vLLM-loadable LoRA: no full-weight fine-tuning, no `modules_to_save` (full-rank replacement weights)
-- **Scoring** — `\boxed{}` extraction across 9 categories: `numeral`, `unit_conversion`, `gravity`, `cipher`, `bit_manipulation`, `cryptarithm_deduce`, `cryptarithm_guess`, `equation_numeric_deduce`, `equation_numeric_guess`
+```text
+scripts/categorize.py
+  -> scripts/build_sft_traces.py
+  -> scripts/build_augmenter_traces.py
+  -> scripts/combine_traces.py
+  -> slurm/train_thk_chunk.slurm, three path-beta chunks
+  -> slurm/eval.slurm
+  -> slurm/package.slurm / scripts/package_submission.py
+  -> Kaggle raw score
+```
 
-> **These constraints are the single most important fact about the project.** Every architectural choice downstream is a consequence of them.
+The local tracked data snapshot used by the THK-rebuild documentation has:
 
----
+| Artifact | Tracked repo snapshot |
+| --- | ---: |
+| `data/sft_traces.jsonl` | 9,050 rows |
+| `data/augmenter_traces.jsonl` | 8,341 rows |
+| `data/sft_combined.jsonl` | 17,391 rows |
+| `data/stratified_holdout.jsonl` | 450 rows |
 
-## 2. Phase-by-Phase Timeline
+Later cluster-side runs may use rebuilt data and larger adapter artifacts that
+are intentionally not stored in git. The final eval log can be added below as
+the durable small artifact for the final score path.
 
-### Phase 0 — HPC infrastructure (Apr 27–28)
+### Evaluation Evidence To Attach
 
-First milestone was getting the model to run at all on Northeastern Explorer. H200 access via the `gpu` partition + `gres=gpu:h200:1`, Apptainer container with vLLM 0.12.0, `$SCRATCH/huggingface` cache for the ~58 GB BF16 weights. AIME25 verification confirmed end-to-end inference (30/30 prompts, 43% pass-rate truncated by token cap — pipeline verification only, not a real reasoning result).
+Kaggle does not expose hidden per-category scores, predictions, or logs. The
+leaderboard score is therefore treated as trusted but not transparent. The
+adapter artifacts are also too large for convenient git storage. The visible
+evidence set for the final outcome is expected to be:
 
-### Phase 1 — Pipeline scaffolding (Apr 29–May 3)
-
-Built the LoRA training stack: HF transformers + peft + accelerate inside the vLLM container with peft installed to `$SCRATCH/lora_pip`. Discovered the first structural constraint: vLLM 0.12.0 couldn't load `target_modules="all-linear"` adapters on Nemotron-H — its `NemotronHForCausalLM` lacked `get_expert_mapping`, so any LoRA touching MoE expert layers was unloadable. Worked around by restricting to attention-only.
-
-### Phase 2 — First algo-CoT submission (May 6) → Kaggle 0.53
-
-Built deterministic algorithmic chain-of-thought generators for `numeral`, `gravity`, `unit_conversion`, `cipher` and trained the LoRA to mimic them. Local per-category solve: 100% on first three, ~38% on `cipher`, 0% on `bit_manipulation` and `equation_numeric_*` (no generator yet).
-
-Kaggle 0.53 decomposed cleanly as `(3 × 100 + 38 + 0 + 0) / 6 ≈ 0.56` — confirming local-vs-leaderboard calibration was honest.
-
-### Phase 3 — Plateau diagnosis (May 8) → Kaggle 0.57
-
-Three different training configs (0.53 / 0.56 / 0.57) all plateaued at the same per-category profile. Concluded that training mechanics weren't the bottleneck; data coverage was:
-
-- `equation_numeric` had only 7 training rows out of 6743.
-- `bit_manipulation` traces were mathematically correct but encoded 2200-token brute-force enumerations that a rank-16 LoRA couldn't execute correctly.
-
-The plateau was a **data-coverage ceiling**, not a training-recipe issue.
-
-### Phase 4 — Reasoner expansion and stratified holdout (May 8–13) → Kaggle 0.66
-
-- Built `equation_numeric` and `cryptarithm` reasoners.
-- Replaced the single-category `numeral_holdout` (which scored 100% regardless of training, giving zero signal) with a stratified 450-prompt holdout across all 9 categories.
-- Lifted LoRA rank from 16 → 32 (the Kaggle cap).
-- Added `--append-thk-suffix` for prompt-shape alignment.
-- Added peft `modules_to_save=[lm_head]` for output-token control.
-
-This was the first attempt to reproduce the THK open-source recipe found on the Kaggle leaderboard at 0.85.
-
-### Phase 5 — vLLM rejection of `modules_to_save` (May 14) → regression
-
-The 4.24 GB adapter with `modules_to_save: [lm_head]` was rejected by Kaggle's hidden vLLM eval. peft writes a full-rank replacement weight under `...lm_head.modules_to_save.default.weight`; vLLM's LoRA loader only understands low-rank A/B decompositions and either rejects the config or chokes on the full-rank key. **This was the first structural constraint that bounded reproduction of THK's recipe.**
-
-Worked around by adding `lm_head` to the regular `target_modules` list as a rank-32 LoRA layer — a vLLM-compatible approximation of THK's `train_unembed: true` full-rank fine-tune.
-
-### Phase 6 — Full THK reproduction (May 14–24) → Kaggle ~0.68–0.70
-
-Implemented `docs/rebuild_checklist.md` — 8 phases of porting the open-source THK pipeline (`tonghuikang/nemotron`, Progress Prize ~0.85). This was a deliberate full reproduction:
-
-- Ported all 9 THK reasoners (`bit_manipulation`, `cipher`, `cryptarithm`, `equation_numeric`, `gravity`, `numeral`, `unit_conversion`) and 5 augmenters (concatenation, splitting, lstrip, spelling, matching).
-- Adopted THK's *"procedure over correctness"* trick — `--keep-wrong-traces --use-reasoner-boxed` keeps traces whose boxed answers are wrong because the procedure is still valid CoT scaffolding.
-- Matched THK's `04-10-04-33` training recipe: LoRA r=32, effective batch 64, linear LR schedule with no warmup, AdamW β₂=0.95, grad clip disabled.
-- Built path-beta chunked training (3 jobs of ~82 steps each) because THK's 245-step run exceeded the 8h `gpu` partition cap.
-- Final corpus: 17,391 records (vs THK's 17,963; the 572-record delta was the 50-per-category local holdout).
-
-This put us at ~0.68–0.70 on Kaggle — within 0.15–0.17 of THK's 0.85 but stuck.
-
-### Phase 7 — Reasoner audit and the `bit_manipulation` breakthrough (May 28) → Kaggle 0.74
-
-A per-category trace-quality diagnostic revealed that the THK reproduction wasn't enough on its own:
-
-| Category | Label correctness | Eval accuracy | Diagnosis |
-| --- | --- | --- | --- |
-| `numeral`, `unit_conv`, `gravity`, `cipher` | 88–100% | 88–100% | working as designed |
-| `equation_numeric_deduce` | 91% | 78% | mostly working |
-| `bit_manipulation` | 85% | 4% | clean labels but LoRA can't clone the 2900-token verbose trace |
-| `cryptarithm_deduce` | 8% | 8% | model faithfully clones the wrong training labels |
-| `cryptarithm_guess` | 9% | 2% | same |
-| `equation_numeric_guess` | 16% | 14% | same |
-
-This was the project's **second major structural finding**: the failure modes split into two categories — *trace length × LoRA capacity* (`bit_manipulation`) and *garbage supervision* (the three "guess"-style categories).
-
-**Two interventions:**
-
-- **Compact `bit_manipulation` reasoner** — a column-by-column rule fitter producing ~470-token traces instead of ~2900. Sacrificed label correctness (85% → 60%) for trace clonability under rank-32 LoRA. Result: `bit_manipulation` eval jumped **0.04 → 0.42**, a 10× improvement.
-- **`--drop-wrong-hard-categories` flag** — removed the 91%-wrong `cryptarithm` traces and 84%-wrong `equation_numeric_guess` traces from training rather than letting the model clone them. Sacrificed quantity for label cleanliness; `equation_numeric_guess` fell to 0 training rows but stopped poisoning the rest of the corpus.
-
-Kaggle moved from ~0.70 to 0.74 — the largest single jump in the project, with ~+0.04 net after the `eq_num_guess` loss netted against the `bit_manipulation` gain.
-
-### Phase 8 — MoE LoRA expansion attempt (May 29–31) → Kaggle 0.74, unchanged
-
-The remaining hypothesis was capacity. The original `target_modules` list reproduced THK's all-linear resolution (8 names + `lm_head`), but might have missed SwiGLU/MoE expert projections under different naming conventions. Added candidate names: `gate_proj`, `w1`, `w2`, `w3`, `gate_up_proj`, `dt_proj`, `x_proj`.
-
-**Result:** trainable parameters jumped from ~80M to 888M (10×), adapter size grew from a few hundred MB to 4.0 GB. The H100 sharing-partition probe confirmed vLLM 0.20.0 accepts the expanded adapter shape (gate projections, Mamba `dt_proj` / `x_proj` and all). Training loss curve hit 0.0002 by step 57 — a clear over-parameterization signal on a 17K-sample corpus.
-
-Eval confirmed the worry: Kaggle 0.74 unchanged, local stratified 0.573 → 0.558 (`cipher` and `eq_num_deduce` each regressed by ~6%). The added capacity was used to memorize, not generalize. **This was the final, decisive ceiling test.**
+- Kaggle raw score: **0.74**.
+- Last local eval-script log: **to be pasted manually**.
+- Repo configs and scripts documenting the tested pipeline.
 
 ---
 
-## 3. Breakthroughs
+## Evaluation Contract
 
-*In order of impact:*
+The competition setup shaped nearly every design choice:
 
-1. **`bit_manipulation` 0.04 → 0.42 (Phase 7).** The single biggest lever in the project. Discovered by reasoning about why a category with 85% clean training labels still scored 4% on eval — answer: rank-32 LoRA couldn't clone a 2900-token structured enumeration. The generalizable lesson is that *trace length × LoRA capacity* is the dominant bottleneck on long-CoT categories; reducing trace complexity is more effective than improving label quality.
+- **Inference:** vLLM-only serving, `max_lora_rank <= 32`, `max_model_len = 8192`,
+  `max_tokens = 7680`, `temperature = 0.0`.
+- **Adapter:** Kaggle loads a LoRA adapter. Full fine-tuning weights and
+  full-rank `modules_to_save` payloads are not part of the tested working
+  submission path.
+- **Scoring:** answers are extracted from `\boxed{}` over 9 categories:
+  `numeral`, `unit_conversion`, `gravity`, `cipher`, `bit_manipulation`,
+  `cryptarithm_deduce`, `cryptarithm_guess`,
+  `equation_numeric_deduce`, and `equation_numeric_guess`.
 
-2. **Recognition that THK's recipe was partly unreachable (Phase 5).** The `modules_to_save: [lm_head]` finding established that the public 0.85 score uses a full-rank `lm_head` update that vLLM's LoRA loader cannot apply. The reproduction has an intrinsic ceiling at the rank-32 approximation of that operation. This is a *negative* breakthrough — it tells you what can't be done, which is just as valuable for stopping the project at the right point.
-
-3. **Plateau decomposition (Phase 3, May 8).** The observation that three training configs at 0.53 / 0.56 / 0.57 all reduced to the same per-category profile pivoted the project from training-recipe tuning to data engineering. Without this, weeks of further hyperparameter sweeps would have produced no progress.
-
-4. **Drop wrong traces on hard categories (Phase 7).** Counterintuitive but correct — under THK's keep-wrong-traces recipe, the `cryptarithm` / `equation_numeric_guess` training traces were 84–91% wrong-boxed. Removing them costs training count but stops the model from cloning wrong-answer patterns. Smaller-but-clean beat larger-but-noisy.
-
----
-
-## 4. The THK Reproduction Phase
-
-Roughly half the project's effort (Phases 4–7) was a deliberate reproduction of an open-source solution rather than original work. This was a strategic choice with both advantages and limitations:
-
-**Advantages**
-
-- A known-good 0.85 reference reduced the search space dramatically. Without it, we'd be exploring the LoRA training landscape blind.
-- THK's choices (rank=32, β₂=0.95, linear LR no warmup, "procedure over correctness") were validated; we inherited months of someone else's iteration.
-- The reference made negative findings durable. We can now state confidently that THK's recipe doesn't reach 0.85 under the public vLLM-LoRA contract — they must have used a different (pre-2026, or with different vLLM patches) eval pathway.
-
-**Limitations**
-
-- The 0.85 reference set unrealistic expectations. The remaining 0.11 gap is structural, not technical; no amount of careful reproduction closes it.
-- The "procedure over correctness" trick is fragile on categories where the reasoner's solve rate is below ~30% — it works for `cipher` and `equation_numeric_deduce` but actively hurts `cryptarithm` and `equation_numeric_guess`. THK got away with it likely because their full-rank `lm_head` training compensated.
+The important framing is "what worked under this contract." Some THK behaviors
+appear reproducible in the repo, while others only have a Kaggle-compatible
+approximation.
 
 ---
 
-## 5. Where We Got Stuck
+## Phase Timeline
 
-Three structural ceilings, none addressable inside the project's chosen contract:
+### Phase 0: HPC Infrastructure, Apr 27-28
 
-1. **Rank-32 `lm_head` ≠ full-rank `lm_head`.** Documented in `configs/train_thk_full.yaml:43-76`. THK's `04-10-04-33` used `train_unembed: True`. vLLM 0.20.0 still cannot load `modules_to_save` adapters. This caps achievable score at roughly 0.78–0.80 for any vLLM-LoRA reproduction.
+The first milestone was simply making the 30B BF16 model run on Northeastern
+Explorer. The working route used H200 GPUs on the `gpu` partition, Apptainer,
+the `vllm/vllm-openai:v0.12.0` container, and `$SCRATCH/huggingface` for the
+model cache. AIME25 smoke verification established that end-to-end inference
+worked. That result was pipeline validation, not a competition-quality result.
 
-2. **Reasoner solve rate caps the "guess" categories.** `cryptarithm_guess` problems use hidden symbol-transformation rules outside any tractable hypothesis class (we measured: 326-permutation position-perm search covers 0%; character substitution covers 0%; cross-op rule transfer 1.5%). Without a fundamentally stronger solver, the training-label correctness for these categories is ~10–16%, which is also the eval ceiling under "procedure over correctness".
+### Phase 1: LoRA Pipeline Scaffolding, Apr 29-May 3
 
-3. **Capacity expansion overfits before it generalizes.** The MoE LoRA expansion (Phase 8) proved that more rank-32 LoRA modules don't lift this corpus — the 17K-record dataset is too small for an 888M-parameter LoRA to learn a non-trivial generalization. The path forward through capacity would require either more diverse data (bounded by the reasoner solve rates above) or full-rank fine-tuning (which the eval contract forbids).
+The repo gained a HF Transformers + PEFT + Accelerate training path inside the
+container. The first adapter topology lesson was that vLLM 0.12.0 could not load
+the original `target_modules="all-linear"` Nemotron-H adapter because the model
+class lacked `get_expert_mapping` for MoE LoRA. The practical workaround was to
+avoid unsupported expert-targeting in the early verification path and later use
+the newer vLLM LoRA eval image.
+
+### Phase 2: First Algorithmic-CoT Submission, May 6 -> Kaggle 0.53
+
+The first real submission trained on deterministic algorithmic traces for
+`numeral`, `gravity`, `unit_conversion`, and `cipher`. The local profile was
+strong on the first three categories, partial on `cipher`, and uncovered on
+`bit_manipulation` and equation categories. Kaggle 0.53 was consistent with
+that visible profile, which made the local-vs-Kaggle calibration feel credible.
+
+### Phase 3: Plateau Diagnosis, May 8 -> Kaggle 0.57
+
+Several training configs landed in the same 0.53-0.57 region. The repo notes
+pointed away from generic hyperparameter tuning and toward data coverage:
+
+- `equation_numeric` had extremely sparse training coverage at that point.
+- `bit_manipulation` had long, correct-looking traces that a small rank-16 LoRA
+  did not execute reliably.
+
+This was the first major negative result: the bottleneck was not just "train
+longer" or "tune learning rate." It was category coverage and trace usability.
+
+### Phase 4: Reasoner Expansion and Stratified Holdout, May 8-13 -> Kaggle 0.66
+
+The project added `equation_numeric` and `cryptarithm` reasoners, moved from the
+single-category `numeral_holdout` to a 450-row stratified holdout, raised LoRA
+rank to 32, aligned prompt suffixes with THK, and tried `modules_to_save=[lm_head]`
+for output-token control.
+
+This phase was the start of the deliberate THK reproduction attempt.
+
+### Phase 5: `modules_to_save` Rejection, May 14
+
+The `modules_to_save=[lm_head]` adapter was rejected by the Kaggle/vLLM path.
+PEFT writes a full-rank replacement tensor under the `modules_to_save` key,
+whereas the working vLLM LoRA loader expects low-rank A/B matrices. The repo
+therefore switched to putting `lm_head` in `target_modules`, which trains a
+rank-32 LoRA approximation of THK's `train_unembed: true` behavior.
+
+This is a strong structural finding for the tested submission route. It does
+not prove no other private or future serving route could behave differently,
+but it does explain why a direct THK full-rank unembedding reproduction is not
+available in the current public vLLM-LoRA workflow.
+
+### Phase 6: THK-Style Reproduction, May 14-24 -> Kaggle about 0.68-0.70
+
+The repo ported the THK-style reasoner and augmenter pipeline:
+
+- 9 reasoner categories.
+- 5 augmenters: concatenation, splitting, lstrip, spelling, and matching.
+- THK's "procedure over correctness" data policy through
+  `--keep-wrong-traces --use-reasoner-boxed`.
+- The `04-10-04-33` style recipe: LoRA rank 32, effective batch 64, linear LR,
+  no warmup, AdamW beta2 0.95, and disabled practical grad clipping.
+- Path-beta chunked training because a single 245-step production run did not
+  fit inside the `gpu` partition walltime.
+
+The tracked repo snapshot for this reproduction has 17,391 combined records,
+which is the holdout-50 build documented in `docs/rebuild_checklist.md`. The
+cluster may contain later rebuilt variants; this report treats those as
+log-backed operational artifacts rather than git-tracked files.
+
+The THK-style route improved the Kaggle score but did not reach the 0.85
+reference score.
+
+### Phase 7: Hard-Category Trace Policy, May 28 -> Kaggle 0.74
+
+The next useful finding came from separating hard-category failures by cause:
+
+| Category group | Observed issue | Tested response |
+| --- | --- | --- |
+| `bit_manipulation` | Labels could be mostly clean, but verbose traces were too long for reliable LoRA cloning | Compact reasoner |
+| `cryptarithm_*` | Training labels were often wrong | Drop wrong hard-category traces |
+| `equation_numeric_guess` | Low label correctness and little clean supervision | Drop wrong traces rather than teach bad boxed answers |
+
+The compact `bit_manipulation` reasoner was the largest positive intervention:
+it shortened verbose multi-thousand-token traces into a much more cloneable
+column/rule-fitting format. The tradeoff was lower raw label correctness but
+better learned behavior. In the recorded eval, `bit_manipulation` improved from
+near-zero behavior to a materially useful category.
+
+The hard-category drop policy was also a useful negative correction: keeping
+wrong traces can teach procedure, but when a category's boxed answers are wrong
+too often, the model learns wrong answer patterns. Smaller and cleaner was
+better than larger and noisy for those categories.
+
+Together these operations moved Kaggle to **0.74**, the best score reached.
+
+### Phase 8: Expanded Target Modules / Capacity Test, May 29-31 -> Kaggle 0.74
+
+The final tested hypothesis was that the remaining gap came from missing LoRA
+capacity or missing module names. The config added candidate SwiGLU/MoE/Mamba
+names such as `gate_proj`, `w1`, `w2`, `w3`, `gate_up_proj`, `dt_proj`, and
+`x_proj`.
+
+The operation increased trainable parameters from about 80M to roughly 884M and
+produced a multi-GB adapter. The H100/vLLM probe showed the expanded adapter
+shape could load. However, the score did not improve: Kaggle stayed at **0.74**,
+and the local stratified eval moved downward in the recorded comparison
+(`0.573 -> 0.558`).
+
+This is best read as an ablation result: more trainable adapter capacity did
+not help this data/config path, and it likely reduced useful regularization.
+It is not a proof that capacity can never help, but it argues against simply
+making this adapter larger without changing data quality or supervision.
 
 ---
 
-## 6. Significance of Reasoning Models and LoRA
+## What Went Well
 
-What this project demonstrated about each:
+1. **A reproducible HPC/vLLM/LoRA path was built.** The project moved from
+   "can we run the model?" to a chunked training and submission workflow.
 
-### On Nemotron-3-Nano-30B-A3B-BF16 specifically, and reasoning models broadly
+2. **The THK reference reduced search waste.** Porting the reasoners,
+   augmenters, suffix behavior, and training recipe made the project compare
+   against a known strong route instead of drifting through arbitrary tuning.
 
-- A 30B hybrid Mamba-2/MoE base model with ~3.5B active params can be steered to 100% solve rates on 4 of 9 reasoning categories (`numeral`, `unit_conversion`, `gravity` at >92%; `cipher` at ~88%) using only ~17K SFT examples and a rank-32 LoRA at <3% of param count. This is an enormous sample-efficiency multiplier vs from-scratch training.
-- The `<think>...</think>` chat template is **load-bearing** — without correct boundary alignment in the training data, the post-`</think>` answer slot fills with random tokens and accuracy collapses. The chat template is not a cosmetic detail.
-- Reasoning models trade context length for solve rate. Categories whose true CoT exceeds ~1500 tokens (verbose `bit_manipulation`, `equation_numeric_deduce`) hit a capacity wall the model can't clear at rank 32. There is a length budget for low-rank reasoning supervision and it's roughly 500–2000 tokens per trace.
+3. **The local eval became more useful.** Moving from a single-category holdout
+   to a 450-row stratified holdout gave signal on the categories that were
+   actually limiting Kaggle performance.
 
-### On LoRA as an adaptation technique
+4. **The best intervention was diagnostic, not just larger training.** The
+   compact `bit_manipulation` trace was found by asking why clean labels still
+   failed at eval time.
 
-- Rank 32 is sufficient for adapting a 30B base to a tight benchmark when the supervision is clean and short. The remaining bottlenecks are structural (`lm_head` full-rank, MoE expert coverage) and contract-level (what the inference engine accepts), not LoRA-mechanics.
-- Adapter size scaling is **not monotonic** with quality. Going from 80M → 888M trainable params (`target_modules` expansion) hurt generalization on this corpus. LoRA's value comes from forcing low-rank structure on the adaptation; defeating that with too many target modules removes the regularization without adding useful expressiveness.
-- vLLM's LoRA contract is a real constraint. Production-eval pipelines that load adapters via vLLM exclude `modules_to_save`, exclude some Mamba-specific projections, and behave differently across vLLM minor versions. Any LoRA recipe targeting a vLLM-served evaluation must be validated against the exact serving stack, not just trained successfully under peft + transformers.
+5. **The final capacity test was valuable even though it did not improve score.**
+   It made the "just add more target modules" path less attractive.
 
-### On the project's contribution
+---
 
-- We confirmed an experimentally-derived ceiling for vLLM-LoRA reproductions of full-fine-tune recipes (~0.74–0.80 vs full-FT 0.85).
-- We documented the *trace length × LoRA capacity* finding as a generalizable principle for any long-CoT distillation under capacity constraints — relevant to math-reasoning distillation, code-CoT distillation, and any setting where a smaller model is taught to mimic a verbose teacher.
-- We characterized the failure modes of "procedure over correctness" SFT — useful future guidance is to gate this technique on a per-category reasoner-solve-rate floor (>30%) rather than applying it globally.
+## What Did Not Work
+
+1. **Full-rank `lm_head` through `modules_to_save` did not survive the tested
+   vLLM/Kaggle path.** This blocked a direct implementation of THK-style
+   `train_unembed: true`.
+
+2. **Early hyperparameter changes did not break the 0.53-0.57 plateau.** The
+   same category profile kept reappearing until data and reasoner coverage
+   changed.
+
+3. **Verbose correct traces were not always learnable traces.** The original
+   `bit_manipulation` traces were too long and brittle for the LoRA to clone
+   into correct answers.
+
+4. **"Procedure over correctness" was not universally safe.** It helped as a
+   THK-style scaffolding idea, but it became harmful for low-solve-rate
+   hard categories.
+
+5. **The expanded 884M-parameter adapter did not improve the final score.** In
+   this tested setting it looked more like overfitting than generalization.
+
+---
+
+## Ablation / Operation Summary
+
+| Operation | Outcome | Interpretation |
+| --- | --- | --- |
+| First deterministic algo-CoT LoRA | Kaggle 0.53 | Basic submission path worked; coverage was incomplete |
+| Several early training configs | Kaggle 0.53-0.57 | Recipe tuning was not the main bottleneck |
+| Add equation/cryptarithm reasoners + stratified holdout + rank 32 | Kaggle 0.66 | Broader category coverage mattered |
+| Try `modules_to_save=[lm_head]` | Kaggle/vLLM rejection | Full-rank replacement weights were not compatible with the tested serving path |
+| Replace full-rank `lm_head` with rank-32 `lm_head` LoRA target | Restored vLLM-loadable route | Practical approximation of THK `train_unembed` |
+| THK-style reasoners/augmenters/recipe | Kaggle about 0.68-0.70 | Reproduction helped but did not close the gap |
+| Compact `bit_manipulation` | Major category improvement | Shorter cloneable traces beat verbose traces |
+| Drop wrong hard-category traces | Net positive in final path | Prevented low-solve-rate categories from teaching wrong boxed answers |
+| Expanded target modules to about 884M trainable params | Kaggle stayed 0.74, local eval regressed | More capacity did not help this data/config route |
+
+---
+
+## Current Interpretation
+
+The fairest summary is:
+
+> The project reached 0.74 under the tested Kaggle-compatible vLLM-LoRA path.
+> The best evidence so far says the remaining gap is not solved by more
+> ordinary hyperparameter tuning or by a much larger LoRA target-module set.
+> The remaining plausible levers are better hard-category solvers, better clean
+> supervision for guess-style categories, or an eval/training route that can
+> use full-rank updates not accepted by the current public vLLM-LoRA contract.
+
+That is intentionally narrower than saying the task is fully solved or making a
+universal claim about the 0.85 reference. The project has tested a specific
+operational route thoroughly enough to justify stopping or changing strategy,
+but not enough to rule out every future solver or serving-stack change.
+
+---
+
+## Reader Notes
+
+- Older repo notes and README sections are useful as a dated work log, but some
+  early links and planning docs predate the final THK-style path. Treat this
+  report, `configs/train_thk_full.yaml`, `docs/path_beta_runbook.md`,
+  `scripts/build_sft_traces.py`, and `scripts/package_submission.py` as the key
+  current-orientation files.
+- Large artifacts are intentionally absent from git. This is expected. For
+  visible reproducibility, attach small logs and config snapshots rather than
+  multi-GB adapters.
+- Kaggle score visibility is limited to the raw score, so per-category
+  conclusions come from local stratified evals and controlled ablations.

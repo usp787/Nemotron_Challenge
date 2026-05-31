@@ -1,5 +1,11 @@
 # Next-round experiment matrix
 
+Historical note: this matrix records the E0/E1/E2 planning stage before the
+later hard-category policy and expanded-target-module experiments. Keep it as a
+decision log, but use `Project_Report.md` for the current May 31 retrospective.
+The `17,963` full-corpus expectation below was an earlier planning target, not a
+current validation rule for later rebuilt cluster artifacts.
+
 Goal: separate the next two global questions before changing the hard-category
 policies themselves:
 

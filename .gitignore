@@ -1,7 +1,5 @@
 # Runtime outputs
 logs/
-outputs/
-*.out
 *.err
 *.jsonl
 !data/*.jsonl

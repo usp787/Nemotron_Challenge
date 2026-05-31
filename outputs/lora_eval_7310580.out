@@ -1,0 +1,127 @@
+=== Stage 0: Slurm allocation check ===
+Node: d4055
+Job ID: 7310580
+Adapter under eval: /home/zha.j/Nemotron_Challenge/outputs/lora_adapter
+Sun May 31 11:54:25 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.86.15              Driver Version: 570.86.15      CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H200                    On  |   00000000:19:00.0 Off |                    0 |
+| N/A   44C    P0             80W /  700W |       1MiB / 143771MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+=== Stage 1: Prerequisites ===
+lrwxrwxrwx 1 zha.j users 62 May 31 05:29 /home/zha.j/Nemotron_Challenge/outputs/lora_adapter -> /home/zha.j/Nemotron_Challenge/outputs/lora_adapter_thk_chunk3
+
+=== Stage 2: Container GPU passthrough ===
+LoRA eval container: GPU OK
+
+=== Stage 3: LoRA-adapted eval ===
+Loaded 450 prompts from data/stratified_holdout.jsonl
+INFO 05-31 11:54:48 [utils.py:233] non-default args: {'trust_remote_code': True, 'dtype': 'bfloat16', 'max_model_len': 8192, 'gpu_memory_utilization': 0.85, 'max_num_seqs': 64, 'disable_log_stats': True, 'enable_lora': True, 'max_lora_rank': 32, 'model': 'nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16'}
+INFO 05-31 11:54:49 [model.py:555] Resolved architecture: NemotronHForCausalLM
+INFO 05-31 11:54:49 [model.py:1680] Using max model len 8192
+INFO 05-31 11:54:49 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=16384.
+INFO 05-31 11:54:49 [config.py:425] Updating mamba_ssm_cache_dtype to 'float32' for NemotronH model
+INFO 05-31 11:54:49 [vllm.py:840] Asynchronous scheduling is enabled.
+INFO 05-31 11:54:49 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'])
+(EngineCore pid=1258070) INFO 05-31 11:55:02 [core.py:109] Initializing a V1 LLM engine (v0.20.0) with config: model='nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16', speculative_config=None, tokenizer='nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=8192, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'ir_enable_torch_wrap': True, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [16384], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 128, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native']), enable_flashinfer_autotune=True, moe_backend='auto')
+(EngineCore pid=1258070) INFO 05-31 11:55:04 [nixl_utils.py:20] Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare memory leak in UCX when using NIXL.
+(EngineCore pid=1258070) INFO 05-31 11:55:04 [nixl_utils.py:32] NIXL is available
+(EngineCore pid=1258070) INFO 05-31 11:55:05 [parallel_state.py:1402] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://10.99.104.55:39235 backend=nccl
+(EngineCore pid=1258070) INFO 05-31 11:55:06 [parallel_state.py:1715] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank 0, EPLB rank N/A
+(EngineCore pid=1258070) INFO 05-31 11:55:06 [gpu_model_runner.py:4777] Starting to load model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16...
+(EngineCore pid=1258070) INFO 05-31 11:55:09 [cuda.py:368] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+(EngineCore pid=1258070) INFO 05-31 11:55:09 [flash_attn.py:646] Using FlashAttention version 3
+(EngineCore pid=1258070) INFO 05-31 11:55:09 [weight_utils.py:904] Filesystem type for checkpoints: NFS. Checkpoint size: 58.82 GiB. Available RAM: 1462.20 GiB.
+(EngineCore pid=1258070) INFO 05-31 11:55:09 [weight_utils.py:874] Prefetching checkpoint files into page cache started (in background)
+(EngineCore pid=1258070) INFO 05-31 11:55:46 [weight_utils.py:851] Prefetching checkpoint files: 10% (2/13)
+(EngineCore pid=1258070) INFO 05-31 11:55:46 [weight_utils.py:851] Prefetching checkpoint files: 20% (3/13)
+(EngineCore pid=1258070) INFO 05-31 11:55:46 [weight_utils.py:851] Prefetching checkpoint files: 30% (4/13)
+(EngineCore pid=1258070) INFO 05-31 11:55:47 [weight_utils.py:851] Prefetching checkpoint files: 40% (6/13)
+(EngineCore pid=1258070) INFO 05-31 11:55:47 [weight_utils.py:851] Prefetching checkpoint files: 50% (7/13)
+(EngineCore pid=1258070) INFO 05-31 11:56:06 [weight_utils.py:851] Prefetching checkpoint files: 60% (8/13)
+(EngineCore pid=1258070) INFO 05-31 11:56:16 [weight_utils.py:851] Prefetching checkpoint files: 70% (10/13)
+(EngineCore pid=1258070) INFO 05-31 11:56:16 [weight_utils.py:851] Prefetching checkpoint files: 80% (11/13)
+(EngineCore pid=1258070) INFO 05-31 11:56:16 [weight_utils.py:851] Prefetching checkpoint files: 90% (12/13)
+(EngineCore pid=1258070) INFO 05-31 11:56:16 [weight_utils.py:851] Prefetching checkpoint files: 100% (13/13)
+(EngineCore pid=1258070) INFO 05-31 11:56:16 [weight_utils.py:869] Prefetching checkpoint files into page cache finished in 66.72s
+(EngineCore pid=1258070) INFO 05-31 11:56:27 [default_loader.py:384] Loading weights took 77.96 seconds
+(EngineCore pid=1258070) INFO 05-31 11:56:27 [unquantized.py:343] Using MoEPrepareAndFinalizeNoDPEPModular
+(EngineCore pid=1258070) INFO 05-31 11:56:27 [utils.py:101] MoE model detected. Using fused MoE LoRA implementation.
+(EngineCore pid=1258070) INFO 05-31 11:56:27 [punica_selector.py:20] Using PunicaWrapperGPU.
+(EngineCore pid=1258070) INFO 05-31 11:56:28 [gpu_model_runner.py:4879] Model loading took 60.62 GiB memory and 80.777149 seconds
+(EngineCore pid=1258070) INFO 05-31 11:56:28 [interface.py:606] Setting attention block size to 2096 tokens to ensure that attention page size is >= mamba page size.
+(EngineCore pid=1258070) INFO 05-31 11:56:28 [interface.py:630] Padding mamba page size by 0.58% to ensure that mamba page size and attention page size are exactly equal.
+(EngineCore pid=1258070) INFO 05-31 11:56:32 [backends.py:1069] Using cache directory: /home/zha.j/.cache/vllm/torch_compile_cache/bb655f8784/rank_0_0/backbone for vLLM's torch.compile
+(EngineCore pid=1258070) INFO 05-31 11:56:32 [backends.py:1128] Dynamo bytecode transform time: 3.02 s
+(EngineCore pid=1258070) INFO 05-31 11:56:34 [backends.py:290] Directly load the compiled graph(s) for compile range (1, 16384) from the cache, took 1.853 s
+(EngineCore pid=1258070) INFO 05-31 11:56:34 [decorators.py:305] Directly load AOT compilation from path /home/zha.j/.cache/vllm/torch_compile_cache/torch_aot_compile/0cdb2f4d6c99a5d17dc9a9f7dd70aaf5a67e88363ecce988eb615335a2855717/rank_0_0/model
+(EngineCore pid=1258070) INFO 05-31 11:56:34 [monitor.py:53] torch.compile took 5.09 s in total
+(EngineCore pid=1258070) WARNING 05-31 11:56:36 [fused_moe.py:1091] Using default MoE config. Performance might be sub-optimal! Config file not found at /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/configs/E=128,N=1856,device_name=NVIDIA_H200.json
+(EngineCore pid=1258070) INFO 05-31 11:56:37 [monitor.py:81] Initial profiling/warmup run took 2.23 s
+(EngineCore pid=1258070) WARNING 05-31 11:56:37 [kv_cache_utils.py:1140] Add 1 padding layers, may waste at most 4.35% KV cache memory
+(EngineCore pid=1258070) INFO 05-31 11:56:37 [ssu_dispatch.py:222] Using triton Mamba SSU backend.
+(EngineCore pid=1258070) INFO 05-31 11:56:37 [gpu_model_runner.py:5963] Profiling CUDA graph memory: PIECEWISE=38 (largest=128), FULL=22 (largest=64)
+(EngineCore pid=1258070) WARNING 05-31 11:56:38 [utils.py:267] Using default LoRA kernel configs
+(EngineCore pid=1258070) INFO 05-31 11:56:40 [gpu_model_runner.py:6042] Estimated CUDA graph memory: 0.82 GiB total
+(EngineCore pid=1258070) INFO 05-31 11:56:41 [gpu_worker.py:440] Available KV cache memory: 54.97 GiB
+(EngineCore pid=1258070) INFO 05-31 11:56:41 [gpu_worker.py:455] CUDA graph memory profiling is enabled (default since v0.21.0). The current --gpu-memory-utilization=0.8500 is equivalent to --gpu-memory-utilization=0.8441 without CUDA graph memory profiling. To maintain the same effective KV cache size as before, increase --gpu-memory-utilization to 0.8559. To disable, set VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.
+(EngineCore pid=1258070) WARNING 05-31 11:56:41 [kv_cache_utils.py:1140] Add 1 padding layers, may waste at most 4.35% KV cache memory
+(EngineCore pid=1258070) INFO 05-31 11:56:41 [kv_cache_utils.py:1711] GPU KV cache size: 1,919,936 tokens
+(EngineCore pid=1258070) INFO 05-31 11:56:41 [kv_cache_utils.py:1716] Maximum concurrency for 8,192 tokens per request: 572.88x
+(EngineCore pid=1258070) INFO 05-31 11:56:50 [gpu_model_runner.py:6133] Graph capturing finished in 9 secs, took 0.84 GiB
+(EngineCore pid=1258070) INFO 05-31 11:56:50 [gpu_worker.py:599] CUDA graph pool memory: 0.84 GiB (actual), 0.82 GiB (estimated), difference: 0.02 GiB (2.3%).
+(EngineCore pid=1258070) INFO 05-31 11:56:50 [core.py:299] init engine (profile, create kv cache, warmup model) took 22.20 s (compilation: 5.09 s)
+(EngineCore pid=1258070) INFO 05-31 11:56:52 [vllm.py:840] Asynchronous scheduling is enabled.
+(EngineCore pid=1258070) INFO 05-31 11:56:52 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'])
+LoRA adapter loaded: /home/zha.j/Nemotron_Challenge/outputs/lora_adapter_thk_chunk3
+WARNING 05-31 11:56:52 [input_processor.py:149] vLLM has deprecated support for supporting different tokenizers for different LoRAs. By default, vLLM uses base model's tokenizer. If you are using a LoRA with its own tokenizer, consider specifying `--tokenizer [lora_path]` to use the LoRA tokenizer.
+(EngineCore pid=1258070) INFO 05-31 13:36:48 [core.py:1238] Shutdown initiated (timeout=0)
+(EngineCore pid=1258070) INFO 05-31 13:36:48 [core.py:1261] Shutdown complete
+Done. successes=450 failures=0 -> outputs/lora_eval_7310580.jsonl
+
+=== Stage 4: Score ===
+Total prompts:           450
+Successful generations:  450
+Failures:                0
+Latency mean (s):        13.32
+Latency median (s):      10.96
+Response length mean:    4720
+Response length median:  3045
+
+Scored:                  450
+Correct:                 251
+Wrong:                   199
+No \boxed{}:          0
+Accuracy:                0.558
+
+Per-category accuracy:
+  category                 n   correct   wrong   no_boxed      acc
+  bit_manipulation        50        21      29          0    0.420
+  cipher                  50        41       9          0    0.820
+  cryptarithm_deduce      50         5      45          0    0.100
+  cryptarithm_guess       50         1      49          0    0.020
+  equation_numeric_deduce    50        37      13          0    0.740
+  equation_numeric_guess    50         0      50          0    0.000
+  gravity                 50        46       4          0    0.920
+  numeral                 50        50       0          0    1.000
+  unit_conversion         50        50       0          0    1.000
+
+=== Eval artifacts ===
+-rw-r--r-- 1 zha.j users 2.8M May 31 13:36 outputs/lora_eval_7310580.jsonl
+
+Eval job 7310580 finished at: Sun May 31 01:36:58 PM EDT 2026

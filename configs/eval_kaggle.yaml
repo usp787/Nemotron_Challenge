@@ -28,8 +28,8 @@ runtime:
     max_loras: 1
 
 data:
-  # Stratified holdout across all 6 Kaggle categories (~100 per category,
-  # excluding any prompt used in data/sft_traces.jsonl). Built by
+  # Stratified holdout across all 9 Kaggle categories (50 per category,
+  # excluding prompts held out from data/sft_traces.jsonl). Built by
   # scripts/build_stratified_holdout.py. Replaces the single-category
   # numeral_holdout.jsonl which scored 100% locally regardless of training
   # config and gave no signal on cipher / bit_manipulation /

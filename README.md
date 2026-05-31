@@ -19,6 +19,11 @@ The repo is designed for a university HPC environment where:
 
 ## 1. Project Overview
 
+Current retrospective: [Project_Report.md](Project_Report.md) summarizes the
+May 31 outcome, final Kaggle score, known ablations, and evidence limitations.
+The bring-up log later in this README is a dated work log and may include older
+planning links or intermediate routes that were superseded.
+
 ### 1.1 Challenge Context
 
 The NVIDIA Nemotron Model Reasoning Challenge is a Kaggle competition centered on improving or evaluating model reasoning behavior. The competition description frames reasoning benchmarks as a way to measure progress in language model reasoning ability, with the practical goal of producing better reasoning outputs under the competition's evaluation setup.

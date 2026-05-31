@@ -1,5 +1,10 @@
 # THK pipeline rebuild — checklist
 
+Historical note: this checklist records the first THK-style rebuild through the
+holdout-50 corpus snapshot. It remains useful for provenance and data-shape
+checks, but the current retrospective and later ablation outcomes live in
+`Project_Report.md`.
+
 Tracks the port of [tonghuikang/nemotron](https://github.com/tonghuikang/nemotron) (Progress Prize, Kaggle LB ~0.85) into this repo's HF + peft + SLURM stack.
 
 Source mirror (raw-fetched, no GB-level folders): `..\nemotron-tonghuikang-source\`. See [README.md](../README.md) for repo layout.
